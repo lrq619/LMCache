@@ -73,8 +73,8 @@ __global__ void load_and_reshape_flash_kernel(
     cache_t tgt_value = value_cache[src_key_value_idx];
 
     if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      key[tgt_key_idx] = tgt_key;
-      value[tgt_value_idx] = tgt_value;
+      key_cache[tgt_key_idx] = tgt_key;
+      value_cache[tgt_value_idx] = tgt_value;
     } else {
       // TODO: Need to convert data type back to fp8
       assert(false); 
@@ -85,6 +85,69 @@ __global__ void load_and_reshape_flash_kernel(
     }
   }
 }
+
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void inplace_mem_move_kernel(
+    cache_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x,
+                                         // block_size, x]
+    cache_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size,
+                                         // block_size]
+    const int64_t* __restrict__ src_slot_mapping,  // [num_heads, num_tokens]
+    const int64_t* __restrict__ dst_slot_mapping,  // [num_heads, num_tokens]
+    const int num_tokens, const int num_heads,
+    const int head_size, const int block_size, const int x, const float k_scale,
+    const float v_scale) {
+  const int64_t token_idx = blockIdx.x;
+
+  const int n = num_heads * head_size;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    
+    const int head_idx = i / head_size;
+    const int head_offset = i % head_size;
+
+    const int64_t src_slot_idx = src_slot_mapping[head_idx * num_tokens + head_offset];
+    const int64_t dst_slot_idx = dst_slot_mapping[head_idx * num_tokens + head_offset];
+
+    const int64_t src_block_idx = src_lot_idx / block_size;
+    const int64_t src_block_offset = src_slot_idx % block_size;
+
+    const int64_t dst_block_idx = dst_lot_idx / block_size;
+    const int64_t dst_block_offset = dst_slot_idx % block_size;
+
+    const int x_idx = head_offset / x;
+    const int x_offset = head_offset % x;
+
+    const int64_t src_key_idx =
+        src_block_idx * num_heads * (head_size / x) * block_size * x +
+        head_idx * (head_size / x) * block_size * x + x_idx * block_size * x +
+        block_offset * x + x_offset;
+    const int64_t src_value_idx =
+        src_block_idx * num_heads * head_size * block_size +
+        head_idx * head_size * block_size + head_offset * block_size +
+        block_offset;
+
+    const int64_t tgt_key_idx =
+        dst_block_idx * num_heads * (head_size / x) * block_size * x +
+        head_idx * (head_size / x) * block_size * x + x_idx * block_size * x +
+        block_offset * x + x_offset;
+    const int64_t tgt_value_idx =
+        dst_block_idx * num_heads * head_size * block_size +
+        head_idx * head_size * block_size + head_offset * block_size +
+        block_offset;
+    
+    scalar_t tgt_key = key[src_key_idx];
+    scalar_t tgt_value = value[src_value_idx];
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      key_cache[tgt_key_idx] = tgt_key;
+      value_cache[tgt_value_idx] = tgt_value;
+    } else {
+      // TODO: Need to convert data type back to fp8
+      assert(false)
+    }
+  }
+}
+
 
 } // namespace lmc
 
@@ -136,4 +199,41 @@ std::tuple<torch::Tensor, torch::Tensor> load_and_reshape_flash(
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
   return std::make_tuple(key, value);
+}
+
+
+#define CALL_INPLACE_MEM_MOVE(KV_T, CACHE_T, KV_DTYPE)         \
+  lmc::inplace_mem_move_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
+          src_slot_mapping.data_ptr<int64_t>(),                        \
+          dst_slot_mapping.data_ptr<int64_t>(), num_tokens, \
+          num_heads, head_size, block_size, x, k_scale, v_scale);
+
+void inplace_mem_move(
+    torch::Tensor& key_cache,  // [num_blocks, num_heads, head_size/x,
+                                // block_size, x]
+    torch::Tensor&
+        value_cache,  // [num_blocks, num_heads, head_size,
+                      // block_size]
+    torch::Tensor& src_slot_mapping,  // [num_heads, num_tokens]
+    torch::Tensor& dst_slot_mapping,  // [num_heads, num_tokens]
+    const std::string& kv_cache_dtype, const double k_scale,
+    const double v_scale) {
+  int num_tokens = src_slot_mapping.size(1);
+  int num_heads= key_cache.size(1);
+  int head_size = value_cache.size(2);
+  int block_size = key_cache.size(3);
+  int x = key_cache.size(4);
+
+  TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(num_heads * head_size, 512));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  DISPATCH_BY_KV_CACHE_DTYPE(key_cache.dtype(), kv_cache_dtype,
+                             CALL_INPACE_MEM_MOVE);
 }
