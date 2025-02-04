@@ -71,7 +71,7 @@ class StoreRequestStats:
 class LMCStatsMonitor:
 
     def __init__(self):
-        # Accumulated stats over time 
+        # Accumulated stats over time
         self.num_retrieve_requests = 0
         self.num_store_requests = 0
 
@@ -202,8 +202,8 @@ class LMCStatsMonitor:
         ret = LMCacheStats(
             num_retrieve_requests=self.num_retrieve_requests,
             num_store_requests=self.num_store_requests,
-            num_requested_tokens = self.num_requested_tokens,
-            num_hit_tokens = self.num_hit_tokens,
+            num_requested_tokens=self.num_requested_tokens,
+            num_hit_tokens=self.num_hit_tokens,
             cache_hit_rate=cache_hit_rate,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -350,8 +350,7 @@ class PrometheusLogger:
 
         self._log_counter(self.counter_num_requested_tokens,
                           stats.num_requested_tokens)
-        self._log_counter(self.counter_num_hit_tokens,
-                          stats.num_hit_tokens)
+        self._log_counter(self.counter_num_hit_tokens, stats.num_hit_tokens)
 
         self._log_gauge(self.gauge_cache_hit_rate, stats.cache_hit_rate)
 
