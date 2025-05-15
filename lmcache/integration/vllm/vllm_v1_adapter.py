@@ -167,9 +167,15 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
+        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
+        # list[list[int]]
+        # Need to check the type of request.block_ids
         unfolded_block_ids = []
-        for ids in new_request.block_ids:
-            unfolded_block_ids.extend(ids)
+        if not isinstance(new_request.block_ids[0], list):
+            unfolded_block_ids = new_request.block_ids.copy()
+        else:
+            for ids in new_request.block_ids:
+                unfolded_block_ids.extend(ids)
 
         return RequestTracker(
             req_id=new_request.req_id,
