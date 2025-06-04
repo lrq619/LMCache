@@ -536,12 +536,10 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
         """
         This function is a generator that moves the KV cache from the memory
-        objects to buffer GPU memory. The first iteration will prepare some
-        related metadata. In each of the following iterations, it will first
-        wait until the loading of the previous layer finish, and then load
-        one layer of KV cache from the memory objects -> GPU buffer.
-        The last iteration simply waits for the last layer
-        to finish.
+        objects to buffer GPU memory. In each iteration i, it (1) loads the KV
+        cache of layer i from CPU -> GPU buffer, (2) recovers the positional
+        encoding of the layer i-1's KV cache in the GPU buffer, and (3)
+        moves the KV cache of layer i-2 from GPU buffer to paged GPU memory.
         In total, this the generator will yield num_layers + 2 times.
 
         :param starts: The starting indices of the KV cache in the corresponding
@@ -549,7 +547,6 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         :param ends: The ending indices of the KV cache in the corresponding
             token sequence.
-
         """
 
         if "kvcaches" not in kwargs:

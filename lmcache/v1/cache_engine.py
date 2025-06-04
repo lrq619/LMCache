@@ -505,7 +505,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Generator[None, None, None]:
-        # FIXME(Jiayi): change the docstring
         """
         Store the KV cache in a layerwise manner.
 
@@ -621,7 +620,6 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Generator[Optional[torch.Tensor], None, None]:
-        # FIXME: fix the comment here
         """
         Retrieve the KV cache in a layerwise manner.
 
