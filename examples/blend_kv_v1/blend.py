@@ -101,7 +101,7 @@ def parse_args():
         "-b",
         "--blend-special-str",
         default="# #",
-        help="Specify whether to use disk as backend (default: False)",
+        help="Specify the special separators to separate chunks (default: '# #')",
     )
 
     return parser.parse_args()
