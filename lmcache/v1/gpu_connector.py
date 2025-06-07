@@ -504,7 +504,6 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             self.load_stream = torch.cuda.Stream()
             self.store_stream = torch.cuda.Stream()
 
-            # FIXME (Jiayi): layer_id: buffer
             self.buffer_mapping = {}
 
         else:
@@ -555,7 +554,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        if self.fused_rotary_emb is None:
+        if self.fused_rotary_emb is None and self.cache_positions:
             # TODO(Jiayi): Make this more elegant
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
@@ -709,11 +708,6 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
-
-        if self.fused_rotary_emb is None:
-            # TODO(Jiayi): Make this more elegant
-            self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
-            self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
 
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
