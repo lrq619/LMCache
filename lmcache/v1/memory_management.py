@@ -17,6 +17,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
+from collections import deque
 import abc
 import ctypes
 import threading
@@ -838,6 +839,217 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         del self.buffer
 
+
+class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
+    """
+    Implements a paged memory allocator.
+    """
+
+    ALIGN_BYTES = 512 # page size, should be determined by token chunk size,
+                      # use layerwise or not, ...
+
+    def __init__(self, tensor: torch.Tensor, align_bytes: int = ALIGN_BYTES):
+        self.buffer = tensor.view(torch.uint8).flatten()
+        buffer_size = self.buffer.numel() * self.buffer.element_size()
+        self.align_bytes = align_bytes
+        
+        # FIXME
+        self.shape = 
+        self.dtype = 
+        self.fmt = 
+        self.parent_allocator = 
+        
+        assert buffer_size % align_bytes == 0, (
+            f"Buffer size {buffer_size} must be a multiple of align bytes {align_bytes}"
+            " in paged memory allocator."
+        )
+        
+        self.paged_buffers = torch.split(self.buffer, align_bytes, dim=0)
+
+        # NOTE: deque is used since thread-safety is not a concern here as
+        # is implemented in C under the hood (in CPython), and operations
+        # on deque are atomic.
+        self.free_blocks = deque()
+
+        for idx, buf in enumerate(self.paged_buffers):
+            # NOTE: start is the paged index
+            start = idx
+            # NOTE: the last unfull chunk's shape needs to be
+            # adjusted during allocation.
+            metadata = MemoryObjMetadata(
+                    self.shape,
+                    self.dtype,
+                    start,
+                    1, # 1 page
+                    1, # ref_count=1
+                    False, # is_pin=False
+                    self.fmt
+                )
+            mem_obj = TensorMemoryObj(
+                raw_data=buf,
+                metadata=metadata,
+                parent_allocator=self.parent_allocator,
+            )
+            self.free_blocks.append(mem_obj)
+
+        # For debugging purposes
+        self.num_active_allocations = 0
+
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+    @staticmethod
+    @_lmcache_nvtx_annotate
+    def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
+        return shape.numel() * dtype.itemsize
+
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+    ) -> Optional[TensorMemoryObj]:
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+        
+        try:
+            free_block = self.free_blocks.popleft()
+        except IndexError:
+            logger.debug(
+                f"Failed to allocate memory for "
+                f"tensor({shape}, {dtype}) because "
+                "no free blocks is available"
+            )
+            return None
+        
+        # FIXME: think about whether fmt and pareant_allocator
+        # should be updated here.
+        free_block.meta.shape = shape
+        
+        # TODO (Jiayi): need a flag to drop these debug ops
+        # Update debug status
+        self.num_active_allocations += 1
+        self.stats_monitor.update_local_cache_usage(
+            self.num_active_allocations*self.aligned_bytes)
+
+        # Allocate the block
+        return free_block
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+    ) -> Optional[List[TensorMemoryObj]]:
+        """
+        Batched allocate tensor memory objs with pre-defined equal sizes.
+        """
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+        
+        allocated_blocks = []
+        for i in range(batch_size):
+            try:
+                free_block = self.free_blocks.popleft()
+            except IndexError:
+                logger.debug(
+                    f"Failed to allocate memory for "
+                    f"tensor({shape}, {dtype}) because "
+                    "no free blocks is available"
+                )
+                self.batched_free(allocated_blocks)
+                return None
+            
+            # FIXME: think about whether fmt and pareant_allocator
+            # should be updated here.
+            free_block.meta.shape = shape
+
+            allocated_blocks.append(free_block)
+            
+        # TODO (Jiayi): need a flag to drop these debug ops
+        # Update debug status
+        self.num_active_allocations += batch_size
+        self.stats_monitor.update_local_cache_usage(
+            self.num_active_allocations*self.aligned_bytes)
+
+        # Allocate the block
+        return free_block
+
+    @_lmcache_nvtx_annotate
+    def free(self, memory_obj: MemoryObj):
+        if not memory_obj.is_valid():
+            return
+
+        self.free_blocks.append(memory_obj)
+        
+        memory_obj.invalidate()
+
+        # TODO (Jiayi): need a flag to drop these debug ops
+        # Update debug status
+        self.total_allocated_size -= self.align_bytes
+        self.num_active_allocations = max(0, self.num_active_allocations - 1)
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+
+    @_lmcache_nvtx_annotate
+    def batched_free(self, memory_objs: List[MemoryObj]):
+        """
+        Batched free memory objs.
+        Unlike `batched_allocate`, this function does not
+        assume that the memory objs are equal-sized.
+        """
+
+        for memory_obj in memory_objs:
+            if not memory_obj.is_valid():
+                logger.warning("Trying to free an invalidated MemoryObj")
+                continue
+            memory_obj.invalidate()
+            self.free_blocks.append(memory_obj)
+
+        num_freed_blocks = len(memory_objs)
+        
+        # TODO (Jiayi): need a flag to drop these debug ops
+        # Update debug status
+        self.total_allocated_size -= self.aligned_bytes * num_freed_blocks
+        self.num_active_allocations = max(
+            0, self.num_active_allocations - num_freed_blocks
+        )
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+
+    def memcheck(self):
+        """For debug purposes.
+        Returns True is everything is fine, otherwise False.
+        """
+        
+        logger.info("Checking memory allocator consistency")
+        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(
+            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
+        )
+
+        # Check the real total free size
+        total_free_size = len(self.free_blocks) * self.align_bytes
+        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+
+        # Check if the numbers are consistent
+        if total_free_size + self.total_allocated_size != self.buffer.numel():
+            logger.error("Memory allocator size is inconsistent")
+            logger.error("This implies a bug in the memory allocator")
+            return False
+
+        return True
+
+    def __del__(self):
+        # FIXME: NIXL-related memory leak should be handled somewhere (else).
+        del self.buffer
 
 class BufferAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory."""
