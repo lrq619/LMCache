@@ -672,36 +672,44 @@ class NixlSender:
 class NixlReceiver:
     """Handles receiving data through a NixlPipe."""
 
-    # FIXME
     def __init__(self, nixl_config: NixlConfig):
         self.nixl_config = nixl_config
 
+        #FIXME:        
+        receiver_host = nixl_config.
+        receiver_base_port =
+        
+        proxy_host = nixl_config.
+        proxy_port = 
+        
+        
+        # TODO (Jiayi)" make it async?"
         # Initialize the ZeroMQ context and side channel
         self._context = zmq.Context()  # type: ignore
-        # Change from PAIR to ROUTER socket
-        self._side_channel = self._context.socket(zmq.ROUTER)  # type: ignore
-        self._side_channel.bind(
-            "tcp://{}:{}".format(nixl_config.receiver_host, nixl_config.receiver_port)
-        )
-        self._side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-        # Add a timeout for the side channel
-        self._side_channel.setsockopt(
-            zmq.RCVTIMEO,  # type: ignore
-            5000,  # Set a timeout for receiving to avoid blocking
-        )
-
-        # Track pipes for each sender
-        self._sender_pipes: dict[bytes, NixlPipe] = {}
-
-        # Observers
-        self._observers: list[NixlObserverInterface] = []
-
+        
+        # TODO (Jiayi): have a util func to do this
+        # Create/listen initialization side channel
+        self._init_side_channel = self._context.socket(zmq.REP)
+        self._init_side_channel.bind(get_zmq_path(
+            receiver_host, receiver_base_port, protocol="tcp"
+        ))
+        
+        # Create/listen allocation side channel
+        self._alloc_side_channel = self._context.socket(zmq.REP)
+        self._alloc_side_channel.bind(get_zmq_path(
+            receiver_host, receiver_base_port, protocol="tcp"
+        ))
+        
+        # Connect to proxy side channel
+        self._proxy_side_channel = self._context.socket(zmq.REQ)
+        self._proxy_side_channel.connect(get_zmq_path(
+            proxy_host, proxy_port, protocol="tcp"
+        ))
+       
+        # FIXME)
         # Start the receiver thread
-        self._running = True
-        self._receiver_thread = threading.Thread(
-            target=self._receiver_loop, daemon=True
-        )
-        self._receiver_thread.start()
+        
+        
         
         
     
@@ -999,8 +1007,13 @@ def message_to_uuid(message: str) -> Optional[str]:
         return None
     return message[len("NIXL_TRANSFER_") :]
 
-
-def get_zmq_path(base_path: str, role)
+# TODO (Jiayi): support multiple protocols
+def get_zmq_path(
+    host: str, port: int, protocol: str = "tcp") -> str:   
+    """Get the ZeroMQ path for the given base path and suffix."""
+    if protocol == "tcp":
+        return f"tcp://{host}:{port}"
+    raise ValueError(f"Unsupported protocol: {protocol}")
 
 
 def init_nixl_agent(
