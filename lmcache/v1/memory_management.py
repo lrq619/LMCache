@@ -61,8 +61,16 @@ class MemoryFormat(Enum):
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
+        elif self == MemoryFormat.KV_T2D:
+            return 1
+        elif self == MemoryFormat.KV_2TD:
+            return 0
         elif self == MemoryFormat.BINARY:
             return 0
+        elif self == MemoryFormat.BINARY_BUFFER:
+            return 0
+        elif self == MemoryFormat.KV_MLA_FMT:
+            return 2
         return 0
 
 
@@ -845,12 +853,13 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     Implements a paged memory allocator.
     """
 
-    ALIGN_BYTES = 512 # page size, should be determined by token chunk size,
+    ALIGN_BYTES =  # page size, should be determined by token chunk size,
                       # use layerwise or not, ...
 
     def __init__(self, tensor: torch.Tensor, align_bytes: int = ALIGN_BYTES):
         self.buffer = tensor.view(torch.uint8).flatten()
-        buffer_size = self.buffer.numel() * self.buffer.element_size()
+        self.buffer_size = self.buffer.numel() * self.buffer.element_size()
+        self.buffer_ptr = self.buffer.data_ptr()
         self.align_bytes = align_bytes
         
         # FIXME
@@ -859,8 +868,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.fmt = 
         self.parent_allocator = 
         
-        assert buffer_size % align_bytes == 0, (
-            f"Buffer size {buffer_size} must be a multiple of align bytes {align_bytes}"
+        assert self.buffer_size % align_bytes == 0, (
+            f"Buffer size {self.buffer_size} must be a multiple of align bytes {align_bytes}"
             " in paged memory allocator."
         )
         

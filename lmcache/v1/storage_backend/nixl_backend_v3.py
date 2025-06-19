@@ -44,204 +44,6 @@ from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfig, NixlRole
 logger = init_logger(__name__)
 
 
-class RecvObjPool:
-    def __init__(self, enable_gc: bool):
-        self.lock = threading.Lock()
-        self._data: dict[CacheEngineKey, MemoryObj] = {}
-        self._cnt: dict[CacheEngineKey, int] = {}
-
-        # TODO: Remove the hard-code
-        # HACK: have a recycle threshold to avoid the memory leak
-        self._recent_added_keys: list[CacheEngineKey] = []
-        self._recent_add_threshold = 80  # Keep recent 90 keys
-        self._recycle_threshold = 160
-
-        self._enable_gc = enable_gc
-        if not self._enable_gc:
-            logger.warning(
-                "GC for receiver is disabled, may lead to memory "
-                "leak in non-testing environment"
-            )
-
-        # Debug information
-        self._dbg_shallow_add = 0
-        self._dbg_deep_add = 0
-        self._dbg_shallow_remove = 0
-        self._dbg_deep_remove = 0
-        self._dbg_num_get = 0
-        self._dbg_num_success_get = 0
-        self._dbg_num_contains = 0
-        self._dbg_num_success_contains = 0
-        self._dbg_num_gc = 0
-        self._dbg_last_report_time = time.time()
-
-    def dbg_report(self):
-        return  # Disable debug report for now
-
-        curr_time = time.time()
-        if curr_time - self._dbg_last_report_time < 5:
-            return
-        self._dbg_last_report_time = curr_time
-
-        logger.warning("RecvObjPool Debug Info:")
-        logger.warning("  - New add: %d", self._dbg_deep_add)
-        logger.warning("  - Redundant add: %d", self._dbg_shallow_add)
-        logger.warning("  - Shallow remove: %d", self._dbg_shallow_remove)
-        logger.warning("  - Deep remove: %d", self._dbg_deep_remove)
-        logger.warning("  - Num get: %d", self._dbg_num_get)
-        logger.warning("  - Num success get: %d", self._dbg_num_success_get)
-        logger.warning("  - Num contains: %d", self._dbg_num_contains)
-        logger.warning("  - Num success contains: %d", self._dbg_num_success_contains)
-        logger.warning("  - Current num_objs: %d", len(self._data))
-        tot_size = sum([self._data[key].get_size() for key in self._data])
-        logger.warning("  - Total size: %.2f GB", tot_size / 1024 / 1024 / 1024)
-        logger.warning("  - Number of GC: %d", self._dbg_num_gc)
-
-    def _gc(self):
-        if not self._enable_gc:
-            return
-
-        logger.warning("In GC!")
-        self._dbg_num_gc += 1
-        st = time.perf_counter()
-        freed_size = 0
-        current_keys = set(self._data.keys())
-        recent_keys = set(self._recent_added_keys)
-        keys_to_evict = current_keys - recent_keys
-        for key in keys_to_evict:
-            freed_size += self._data[key].get_size()
-            self._data.pop(key)
-            self._cnt.pop(key)
-        ed = time.perf_counter()
-        logger.warning(
-            "GC in %.4f msec, released %.2f GB memory",
-            (ed - st) * 1000,
-            freed_size / 1024 / 1024 / 1024,
-        )
-
-    def add(self, key: CacheEngineKey, obj: MemoryObj):
-        with self.lock:
-            # TODO: Get rid of this
-            self._recent_added_keys.append(key)
-            self._recent_added_keys = self._recent_added_keys[
-                -self._recent_add_threshold :
-            ]
-
-            if key in self._data:
-                self._cnt[key] += 1
-
-                # DEBUG
-                self._dbg_shallow_add += 1
-            else:
-                self._data[key] = obj
-                self._cnt[key] = 1
-
-                # DEBUG
-                self._dbg_deep_add += 1
-
-            # DEBUG
-            self.dbg_report()
-
-    def remove(self, key: CacheEngineKey) -> bool:
-        with self.lock:
-            if key in self._cnt:
-                self._cnt[key] -= 1
-                if self._cnt[key] == 0:
-                    self._data.pop(key)
-                    self._cnt.pop(key)
-
-                    # DEBUG
-                    self._dbg_deep_remove += 1
-                else:
-                    # DEBUG
-                    self._dbg_shallow_remove += 1
-
-            self.dbg_report()
-            return True
-
-    def contains(self, key: CacheEngineKey) -> bool:
-        with self.lock:
-            if len(self._data) >= self._recycle_threshold:
-                self._gc()
-
-            # DEBUG
-            ret = key in self._data
-            self._dbg_num_contains += 1
-            if ret:
-                self._dbg_num_success_contains += 1
-            self.dbg_report()
-
-            return ret
-
-    def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        with self.lock:
-            # DEBUG
-            ret = self._data.get(key, None)
-            self._dbg_num_get += 1
-            if ret is not None:
-                self._dbg_num_success_get += 1
-            self.dbg_report()
-
-            return ret
-
-    def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
-
-    def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
-
-
-class BasicNixlObserver(NixlObserverInterface):
-    """
-    Basic implementation of the NixlObserverInterface to handle
-    events from NixlChannel.
-    """
-
-    def __init__(self, obj_pool: RecvObjPool):
-        """
-        Initialize the BasicNixlObserver.
-        """
-        self.obj_pool = obj_pool
-
-    @_lmcache_nvtx_annotate
-    def __call__(
-        self,
-        keys: list[CacheEngineKey],
-        objs: list[MemoryObj],
-        is_view: bool = True,
-    ):
-        """Blocking function to process the received objects
-
-        Args:
-          keys: the CacheEngineKeys
-          objs: the list of MemoryObj
-          is_view: whether the memory objects are the view of the underlying
-            transfer buffer  (i.e., whether it will be overwrite by next
-            transfer)
-        """
-        clone_time = 0.0
-        add_time = 0.0
-        for key, value in zip(keys, objs, strict=False):
-            assert value.tensor is not None, "The tensor in the MemoryObj is None."
-            if is_view:
-                # self.obj_pool.add(key, value)
-                st = time.perf_counter()
-                copied_obj = TensorMemoryObj(value.tensor.clone(), value.metadata)
-                ed = time.perf_counter()
-                self.obj_pool.add(key, copied_obj)
-                ed2 = time.perf_counter()
-                clone_time += (ed - st) * 1000
-                add_time += (ed2 - ed) * 1000
-            else:
-                self.obj_pool.add(key, value)
-        logger.debug(
-            "Nixl Observer: clone time: %.4f msec, Add time: %.4f msec for %d objects",
-            clone_time,
-            add_time,
-            len(keys),
-        )
-
-
 class NixlBackend(StorageBackendInterface):
     """
     Implementation of the StorageBackendInterface for Nixl.
@@ -253,7 +55,11 @@ class NixlBackend(StorageBackendInterface):
     to the receiver side.
     """
 
-    def __init__(self, nixl_config: NixlConfig):
+    def __init__(
+        self, 
+        nixl_config: NixlConfig,
+        config: LMCacheEngineConfig,
+    ):
         """
         Initialize the Nixl storage backend.
 
@@ -261,25 +67,21 @@ class NixlBackend(StorageBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
-        self._obj_pool = RecvObjPool(nixl_config.enable_gc)
-        # self._data: dict[CacheEngineKey, MemoryObj] = {}
+        
+        # NOTE(Jiayi): sender/prefiller will not use this pool;
+        # only receiver/decoder will.
+        self._data: dict[CacheEngineKey, MemoryObj] = {}
+        
+        # FIXME(Jiayi): do we need this lock?
         # self._data_lock = threading.Lock()
 
-        self._nixl_channel = NixlChannel(nixl_config)
+        self._nixl_channel = NixlChannel(
+            nixl_config, config, self)
         
         assert nixl_config.role in [
             NixlRole.SENDER,
             NixlRole.RECEIVER,
         ], "Nixl role must be either SENDER or RECEIVER."
-
-        if nixl_config.role == NixlRole.RECEIVER:
-            self._nixl_observer = BasicNixlObserver(self._obj_pool)
-            self._nixl_channel.register_receive_observer(observer=self._nixl_observer)
-
-
-        self._registered_keys: list[CacheEngineKey] = []
-        self._registered_metadatas: list[MemoryObjMetadata] = []
-        self._num_payload_added = 0
 
     # TODO(Jiayi): handle `pin` smantics
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -302,6 +104,13 @@ class NixlBackend(StorageBackendInterface):
         """
         return False
 
+    def put(
+        self,
+        key: CacheEngineKey,
+        mem_obj: MemoryObj,
+    ):
+        self._data[key] = mem_obj
+        
     def register_put_tasks(
         self,
         keys: list[CacheEngineKey],
@@ -310,11 +119,6 @@ class NixlBackend(StorageBackendInterface):
         """
         Register the put tasks to the backend.
         """
-        #if len(self._registered_keys) > 0:
-        #    raise RuntimeError("The backend has already registered put tasks.")
-
-        #self._registered_keys = keys
-        #self._registered_metadatas = metadatas
         self._nixl_channel.prepare_send(keys=keys, mem_objs=mem_objs)
 
     def allocate(
@@ -322,7 +126,7 @@ class NixlBackend(StorageBackendInterface):
         shape: torch.Size,
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        eviction: bool = True,
+        eviction: bool = False,
     ) -> MemoryObj:
         """
         Allocate a zero-copy write object for the given shape and dtype.
@@ -330,33 +134,18 @@ class NixlBackend(StorageBackendInterface):
         This will be seen as "adding a new payload" to the backend.
         """
 
-        self._num_payload_added += 1
-
         mem_obj = self._nixl_channel.local_allocate(shape=shape, dtype=dtype, fmt=fmt)
+        
+        # NOTE: The following will never happen since `local_allocate`
+        # will always wait for a valid MemoryObj.
         assert mem_obj is not None, "Failed to allocate zero-copy buffer from nixl_channel"
+        
         return mem_obj
-
-    def flush_put_tasks(self) -> None:
-        """
-        Flush the registered tasks
-        """
-        assert len(self._registered_keys) > 0, (
-            "The backend has not registered put tasks."
-        )
-        assert self._num_payload_added == len(self._registered_keys), (
-            "The number of payloads added is not equal to the number ofregistered keys."
-        )
-
-        self._nixl_channel.finish_send()
-        self._registered_keys = []
-        self._registered_metadatas = []
-        self._num_payload_added = 0
 
     def batched_submit_put_task(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ) -> Optional[List[Future]]:
         self.register_put_tasks(keys, memory_objs)
-        self.flush_put_tasks()
         return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
@@ -369,6 +158,7 @@ class NixlBackend(StorageBackendInterface):
         """
         raise NotImplementedError
 
+    # FIXME
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -377,7 +167,12 @@ class NixlBackend(StorageBackendInterface):
 
         :return: MemoryObj. None if the key does not exist.
         """
-        return self._obj_pool.get(key)
+        
+        # NOTE(Jiayi): we assume that the key must be in local data
+        mem_obj = self._data.get(key, None)
+        assert mem_obj is not None, f"Key {key} not found in local data."
+        
+        return mem_obj
 
     def get_non_blocking(
         self,
@@ -399,11 +194,6 @@ class NixlBackend(StorageBackendInterface):
         """
         self._nixl_channel.close()
 
-    def get_underlying_allocator(self) -> MemoryAllocatorInterface:
-        """
-        Get the underlying allocator from Nixl channel.
-        """
-        return self._nixl_channel.get_allocator()
 
     def pin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
@@ -411,6 +201,7 @@ class NixlBackend(StorageBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
 
+    # FIXME: better dropping this
     @staticmethod
     def CreateNixlBackend(
         config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
