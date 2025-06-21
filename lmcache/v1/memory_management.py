@@ -853,27 +853,33 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     Implements a paged memory allocator.
     """
 
-    ALIGN_BYTES =  # page size, should be determined by token chunk size,
-                      # use layerwise or not, ...
-
-    def __init__(self, tensor: torch.Tensor, align_bytes: int = ALIGN_BYTES):
+    def __init__(
+        self, 
+        tensor: torch.Tensor,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD
+    ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.buffer_size = self.buffer.numel() * self.buffer.element_size()
         self.buffer_ptr = self.buffer.data_ptr()
-        self.align_bytes = align_bytes
         
-        # FIXME
-        self.shape = 
-        self.dtype = 
-        self.fmt = 
-        self.parent_allocator = 
+        self.shape = shape
+        self.dtype = dtype
+        self.fmt = fmt
+        self.parent_allocator = self
         
-        assert self.buffer_size % align_bytes == 0, (
-            f"Buffer size {self.buffer_size} must be a multiple of align bytes {align_bytes}"
+        num_elements = shape.numel()
+        bytes_per_element = torch.tensor([], dtype=dtype).element_size()
+        self.align_bytes = num_elements * bytes_per_element
+        
+        assert self.buffer_size % self.align_bytes == 0, (
+            f"Buffer size {self.buffer_size} must be a"
+            f" multiple of align bytes {self.align_bytes}"
             " in paged memory allocator."
         )
         
-        self.paged_buffers = torch.split(self.buffer, align_bytes, dim=0)
+        self.paged_buffers = torch.split(self.buffer, self.align_bytes, dim=0)
 
         # NOTE: deque is used since thread-safety is not a concern here as
         # is implemented in C under the hood (in CPython), and operations

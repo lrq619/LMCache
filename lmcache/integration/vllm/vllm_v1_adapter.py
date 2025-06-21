@@ -38,7 +38,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LayerwiseLMCacheEngine, LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
-
+from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
+    NixlReceiverInfo,
+)
 if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -150,6 +152,10 @@ class SaveSpec:
     # Whether the scheduler allow us to save the tokens
     can_save: bool
 
+@dataclass
+class DisaggSpec:
+    req_id: str
+    receiver_info: NixlReceiverInfo
 
 @dataclass
 class RequestTracker:
@@ -167,6 +173,9 @@ class RequestTracker:
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
+    
+    # Disagg spec for the request
+    disagg_spec: Optional[DisaggSpec] = None
 
     @staticmethod
     def from_new_request(
@@ -200,12 +209,33 @@ class RequestTracker:
             # NOTE: Also, `update` method in RequestTracker should be
             # updated accordingly.
             unfolded_block_ids = new_request.block_ids[0].copy()
+        
+        kv_transfer_params = new_request.kv_transfer_params
+        
+        if kv_transfer_params is not None and \
+            "disagg_spec" in kv_transfer_params:
+            req_disagg_spec=kv_transfer_params["disagg_spec"]
+            
+            receiver_id = req_disagg_spec["receiver_host"] + \
+                str(req_disagg_spec['receiver_port'])
+            receiver_info = NixlReceiverInfo(
+                receiver_id=receiver_id,
+                receiver_host=req_disagg_spec["receiver_host"],
+                receiver_init_port=req_disagg_spec["receiver_init_port"],
+                receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+            )
+            
+            disagg_spec = DisaggSpec(
+                req_id=new_request.req_id,
+                receiver_info=receiver_info,
+            )
 
         return RequestTracker(
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
-            num_saved_tokens=0,
+            num_saved_tokens=0, # TODO (Jiayi): this might be suboptimal
+            disagg_spec=disagg_spec,
         )
 
     def update(
@@ -669,6 +699,9 @@ class LMCacheConnectorV1Impl:
                     is_first = True
                 else:
                     sync = False
+                
+                # TODO (Jiayi): need to make layerwise storing
+                # compatible with disagg spec
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -755,6 +788,7 @@ class LMCacheConnectorV1Impl:
                 kvcaches=kvcaches,
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
+                transfer_spec=request.disagg_spec,
             )
 
     def get_finished(

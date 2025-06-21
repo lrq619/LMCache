@@ -97,7 +97,8 @@ NixlMsg = Union[
 class NixlReceiverInfo:
     receiver_id: str
     receiver_host: Optional[str] = None
-    receiver_port: Optional[int] = None
+    receiver_init_port: Optional[int] = None
+    receiver_alloc_port: Optional[int] = None
     
 # no need to be msgspec
 @dataclass
@@ -181,13 +182,16 @@ class NixlSender:
     def prepare_send(
         self, 
         keys: list[CacheEngineKey], 
-        mem_objs: list[MemoryObj]
+        mem_objs: list[MemoryObj],
+        transfer_spec = None,
     ):
         """
         Put the sender task into the request queue. 
         """
-        
+                
         sender_task = NixlSenderTask(
+            req_id=transfer_spec.req_id,
+            receiver_info=transfer_spec.receiver_info,
             keys=keys,
             mem_objs=mem_objs,
         )

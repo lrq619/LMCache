@@ -113,16 +113,6 @@ class NixlBackend(StorageBackendInterface):
         mem_obj: MemoryObj,
     ):
         self._data[key] = mem_obj
-        
-    def register_put_tasks(
-        self,
-        keys: list[CacheEngineKey],
-        mem_objs: list[MemoryObj],
-    ) -> None:
-        """
-        Register the put tasks to the backend.
-        """
-        self._nixl_channel.prepare_send(keys=keys, mem_objs=mem_objs)
 
     def allocate(
         self,
@@ -148,9 +138,16 @@ class NixlBackend(StorageBackendInterface):
         return mem_obj
 
     def batched_submit_put_task(
-        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec = None,
     ) -> Optional[List[Future]]:
-        self.register_put_tasks(keys, memory_objs)
+        self._nixl_channel.prepare_send(
+            keys=keys, 
+            mem_objs=memory_objs,
+            transfer_spec=transfer_spec,
+        )
         return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
