@@ -37,13 +37,13 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate
 )
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MemoryObjMetadata,
-    TensorMemoryObj,
 )
-from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfig, NixlRole
+from lmcache.v1.storage_backend.connector.nixl_utils import (
+    NixlConfigXpYd,
+    NixlRole
+)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -150,7 +150,7 @@ class NixlSender:
 
     def __init__(
         self, 
-        nixl_config: NixlConfig,
+        nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
     ):
@@ -399,7 +399,7 @@ class NixlReceiver:
 
     def __init__(
         self, 
-        nixl_config: NixlConfig,
+        nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
     ):
@@ -420,11 +420,12 @@ class NixlReceiver:
         
         self.nixl_config = nixl_config
         
-        receiver_host = nixl_config.nixl_peer_host
-        receiver_base_port = nixl_config.nixl_peer_port
+        receiver_host = nixl_config.peer_host
+        receiver_init_port = nixl_config.peer_init_port
+        receiver_alloc_port = nixl_config.peer_alloc_port
         
-        receiver_init_url = f"{receiver_host}:{receiver_base_port}"
-        receiver_alloc_url = f"{receiver_host}:{receiver_base_port+1}"
+        receiver_init_url = f"{receiver_host}:{receiver_init_port}"
+        receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
         
         proxy_host = nixl_config.proxy_host
         proxy_port = nixl_config.proxy_port
@@ -648,7 +649,7 @@ class NixlChannel:
 
     def __init__(
         self, 
-        nixl_config: NixlConfig,
+        nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
     ):

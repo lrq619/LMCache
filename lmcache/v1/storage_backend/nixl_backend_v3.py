@@ -25,21 +25,20 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MemoryObjMetadata,
-    TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
-from lmcache.v1.storage_backend.connector.nixl_connector_v2 import (
+from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlChannel,
-    NixlObserverInterface,
 )
-from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfig, NixlRole
+from lmcache.v1.storage_backend.connector.nixl_utils import (
+    NixlConfigXpYd,
+    NixlRole
+)
 
 logger = init_logger(__name__)
 
@@ -57,7 +56,7 @@ class NixlBackend(StorageBackendInterface):
 
     def __init__(
         self, 
-        nixl_config: NixlConfig,
+        nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
     ):
         """
@@ -82,6 +81,10 @@ class NixlBackend(StorageBackendInterface):
             NixlRole.SENDER,
             NixlRole.RECEIVER,
         ], "Nixl role must be either SENDER or RECEIVER."
+        
+        # TODO(Jiayi): make this outside backend initialization
+        # FIXME:
+        self.memory_allocator 
 
     # TODO(Jiayi): handle `pin` smantics
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -93,7 +96,7 @@ class NixlBackend(StorageBackendInterface):
 
         :return: True if the key exists, False otherwise
         """
-        return self._obj_pool.contains(key)
+        return key in self._data
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -134,11 +137,13 @@ class NixlBackend(StorageBackendInterface):
         This will be seen as "adding a new payload" to the backend.
         """
 
-        mem_obj = self._nixl_channel.local_allocate(shape=shape, dtype=dtype, fmt=fmt)
+        mem_obj = self._nixl_channel.local_allocate(
+            shape=shape, dtype=dtype, fmt=fmt)
         
         # NOTE: The following will never happen since `local_allocate`
         # will always wait for a valid MemoryObj.
-        assert mem_obj is not None, "Failed to allocate zero-copy buffer from nixl_channel"
+        assert mem_obj is not None, \
+            "Failed to allocate zero-copy buffer from nixl_channel"
         
         return mem_obj
 
@@ -158,7 +163,6 @@ class NixlBackend(StorageBackendInterface):
         """
         raise NotImplementedError
 
-    # FIXME
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
         A blocking function to get the kv cache from the storage backend.
@@ -169,6 +173,7 @@ class NixlBackend(StorageBackendInterface):
         """
         
         # NOTE(Jiayi): we assume that the key must be in local data
+        # because we are using a push-based transfer
         mem_obj = self._data.get(key, None)
         assert mem_obj is not None, f"Key {key} not found in local data."
         
@@ -186,7 +191,7 @@ class NixlBackend(StorageBackendInterface):
 
         :param key: The key to remove.
         """
-        return self._obj_pool.remove(key)
+        return self._data.pop(key, None) is not None
 
     def close(self) -> None:
         """
@@ -201,7 +206,7 @@ class NixlBackend(StorageBackendInterface):
     def unpin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
 
-    # FIXME: better dropping this
+    # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(
         config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
@@ -215,7 +220,7 @@ class NixlBackend(StorageBackendInterface):
         :return: A NixlBackend instance.
         """
         # Create the Nixl config
-        nixl_config = NixlConfig.from_cache_engine_config(config, metadata)
+        nixl_config = NixlConfigXpYd.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlBackend(nixl_config)
+        backend = NixlBackend(nixl_config, config)
         return backend
