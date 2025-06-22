@@ -14,10 +14,10 @@
 # limitations under the License.
 
 # Standard
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
-from collections import deque
 import abc
 import ctypes
 import threading
@@ -854,31 +854,31 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
 
     def __init__(
-        self, 
+        self,
         tensor: torch.Tensor,
         shape: torch.Size,
         dtype: torch.dtype,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.buffer_size = self.buffer.numel() * self.buffer.element_size()
         self.buffer_ptr = self.buffer.data_ptr()
-        
+
         self.shape = shape
         self.dtype = dtype
         self.fmt = fmt
         self.parent_allocator = self
-        
+
         num_elements = shape.numel()
         bytes_per_element = torch.tensor([], dtype=dtype).element_size()
         self.align_bytes = num_elements * bytes_per_element
-        
+
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
             f" multiple of align bytes {self.align_bytes}"
             " in paged memory allocator."
         )
-        
+
         self.paged_buffers = torch.split(self.buffer, self.align_bytes, dim=0)
 
         # NOTE: deque is used since thread-safety is not a concern here as
@@ -887,19 +887,18 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.free_blocks = deque()
 
         for idx, buf in enumerate(self.paged_buffers):
-            # NOTE: start is the paged index
-            start = idx
+            # NOTE: idx is the paged index
             # NOTE: the last unfull chunk's shape needs to be
             # adjusted during allocation.
             metadata = MemoryObjMetadata(
-                    self.shape,
-                    self.dtype,
-                    start,
-                    1, # 1 page
-                    1, # ref_count=1
-                    False, # is_pin=False
-                    self.fmt
-                )
+                self.shape,
+                self.dtype,
+                idx,
+                1,  # 1 page
+                1,  # ref_count=1
+                False,  # is_pin=False
+                self.fmt,
+            )
             mem_obj = TensorMemoryObj(
                 raw_data=buf,
                 metadata=metadata,
@@ -917,7 +916,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
         return shape.numel() * dtype.itemsize
 
-
     @_lmcache_nvtx_annotate
     def allocate(
         self,
@@ -930,7 +928,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             shape = torch.Size(shape)
 
         assert dtype is not None, "dtype must be specified"
-        
+
         try:
             free_block = self.free_blocks.popleft()
         except IndexError:
@@ -940,16 +938,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 "no free blocks is available"
             )
             return None
-        
-        # FIXME: think about whether fmt and pareant_allocator
-        # should be updated here.
+
+        # TODO (Jiayi): This is a bit redundant.
         free_block.meta.shape = shape
-        
+        free_block.meta.fmt = fmt
+
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.num_active_allocations += 1
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations*self.aligned_bytes)
+            self.num_active_allocations * self.aligned_bytes
+        )
 
         # Allocate the block
         return free_block
@@ -970,7 +969,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             shape = torch.Size(shape)
 
         assert dtype is not None, "dtype must be specified"
-        
+
         allocated_blocks = []
         for i in range(batch_size):
             try:
@@ -983,18 +982,19 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 )
                 self.batched_free(allocated_blocks)
                 return None
-            
+
             # FIXME: think about whether fmt and pareant_allocator
             # should be updated here.
             free_block.meta.shape = shape
 
             allocated_blocks.append(free_block)
-            
+
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.num_active_allocations += batch_size
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations*self.aligned_bytes)
+            self.num_active_allocations * self.aligned_bytes
+        )
 
         # Allocate the block
         return free_block
@@ -1005,7 +1005,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             return
 
         self.free_blocks.append(memory_obj)
-        
+
         memory_obj.invalidate()
 
         # TODO (Jiayi): need a flag to drop these debug ops
@@ -1030,7 +1030,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             self.free_blocks.append(memory_obj)
 
         num_freed_blocks = len(memory_objs)
-        
+
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.total_allocated_size -= self.aligned_bytes * num_freed_blocks
@@ -1043,7 +1043,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """For debug purposes.
         Returns True is everything is fine, otherwise False.
         """
-        
+
         logger.info("Checking memory allocator consistency")
         logger.info(f" - Total active allocations: {self.num_active_allocations}")
         logger.info(
@@ -1065,6 +1065,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
 
 class BufferAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated pinned memory."""

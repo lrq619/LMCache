@@ -151,6 +151,10 @@ main() {
         --num-prefillers 2 \
         --decoder-host localhost \
         --decoder-port 8200  \
+        --decoder-init-port 8300 \
+        --decoder-alloc-port 8400 \
+        --proxy-host localhost \
+        --proxy-port 8500 \
         --num-decoders 2 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
