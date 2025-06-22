@@ -947,7 +947,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += 1
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations * self.aligned_bytes
+            self.num_active_allocations * self.align_bytes
         )
 
         # Allocate the block
@@ -993,7 +993,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += batch_size
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations * self.aligned_bytes
+            self.num_active_allocations * self.align_bytes
         )
 
         # Allocate the block
@@ -1033,7 +1033,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
-        self.total_allocated_size -= self.aligned_bytes * num_freed_blocks
+        self.total_allocated_size -= self.align_bytes * num_freed_blocks
         self.num_active_allocations = max(
             0, self.num_active_allocations - num_freed_blocks
         )

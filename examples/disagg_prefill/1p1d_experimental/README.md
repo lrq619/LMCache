@@ -6,7 +6,7 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 - Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
 - Install [NIXL](https://github.com/ai-dynamo/nixl).
-- At least 4 GPUs
+- At least 2 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
 
 ### Usage
@@ -20,9 +20,9 @@ to start disaggregated prefill and benchmark the performance.
 
 The script will:
 
-1. Launch 2 decoder instances listening on port 8200 and 8202, respectively
-2. Launch 2 prefill instances listening on ports 8100 and 8101, respectively
-3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9000
+1. Launch 1 decoder instances listening on port 7200.
+2. Launch 1 prefill instances listening on ports 7100.
+3. Launch a proxy server, listening on port 9100
 
 Press `Ctrl+C` to stop the servers.
 
@@ -31,7 +31,7 @@ Press `Ctrl+C` to stop the servers.
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
-python benchmark_serving.py --port 9000 --seed $(date +%s) \
+python benchmark_serving.py --port 9100 --seed $(date +%s) \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name random --random-input-len 7500 --random-output-len 200 \
     --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos
@@ -72,11 +72,10 @@ P99 ITL (ms):                            11.43
 
 #### Configuration
 - `configs/lmcache-prefiller-config.yaml` - Configuration for prefiller server
-- `configs/lmcache-decoder-1-config.yaml` - Configuration for decoder server 1
-- `configs/lmcache-decoder-2-config.yaml` - Configuration for decoder server 2
+- `configs/lmcache-decoder-config.yaml` - Configuration for decoder server
 
 #### Log Files
 The main script generates several log files:
-- `prefiller1.log` and `prefiller2.log` - Logs from the prefill servers
-- `decoder1.log` and `decoder2.log` - Logs from the decode server
+- `prefiller.log` - Logs from the prefill server
+- `decoder.log` and - Logs from the decode server
 - `proxy.log` - Logs from the proxy server

@@ -120,7 +120,7 @@ class NixlBackend(StorageBackendInterface):
         This will be seen as "adding a new payload" to the backend.
         """
 
-        mem_obj = self._nixl_channel.local_allocate(shape=shape, dtype=dtype, fmt=fmt)
+        mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
 
         # NOTE: The following will never happen since `local_allocate`
         # will always wait for a valid MemoryObj.

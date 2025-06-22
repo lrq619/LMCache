@@ -17,16 +17,16 @@ fi
 
 
 if [[ $1 == "prefiller" ]]; then
-    # Prefiller listens on port 8100
+    # Prefiller listens on port 7100
     prefill_config_file=$SCRIPT_DIR/configs/lmcache-prefiller-config.yaml
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
-        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_ENABLE_V1_MULTIPROCESSING=4 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=0 \
+        CUDA_VISIBLE_DEVICES=4 \
         vllm serve $MODEL \
-        --port 8100 \
+        --port 7100 \
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
@@ -36,16 +36,16 @@ if [[ $1 == "prefiller" ]]; then
 
 
 elif [[ $1 == "decoder" ]]; then
-    # Decoder listens on port 8200
+    # Decoder listens on port 7200
     decode_config_file=$SCRIPT_DIR/configs/lmcache-decoder-config.yaml
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=1 \
+        CUDA_VISIBLE_DEVICES=5 \
         vllm serve $MODEL \
-        --port 8200 \
+        --port 7200 \
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \

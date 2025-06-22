@@ -118,16 +118,16 @@ main() {
     # Launch the proxy first
     python3 disagg_proxy_server_first_token_from_prefiller.py \
         --host localhost \
-        --port 9000 \
+        --port 9100 \
         --prefiller-host localhost \
-        --prefiller-port 8100 \
+        --prefiller-port 7100 \
         --num-prefillers 1 \
         --decoder-host localhost \
-        --decoder-port 8200  \
-        --decoder-init-port 8300 \
-        --decoder-alloc-port 8400 \
+        --decoder-port 7200  \
+        --decoder-init-port 7300 \
+        --decoder-alloc-port 7400 \
         --proxy-host localhost \
-        --proxy-port 8500 \
+        --proxy-port 7500 \
         --num-decoders 1 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
@@ -147,9 +147,9 @@ main() {
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
 
-    wait_for_server 8200
-    wait_for_server 8100
-    wait_for_server 9000
+    wait_for_server 7200
+    wait_for_server 7100
+    wait_for_server 9100
 
     echo "==================================================="
     echo "All servers are up. You can send request now..."

@@ -159,6 +159,7 @@ class DisaggSpec:
     req_id: str
     receiver_info: NixlReceiverInfo
 
+tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 @dataclass
 class RequestTracker:
@@ -213,26 +214,11 @@ class RequestTracker:
             # updated accordingly.
             unfolded_block_ids = new_request.block_ids[0].copy()
 
-        kv_transfer_params = new_request.kv_transfer_params
-
-        if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
-            req_disagg_spec = kv_transfer_params["disagg_spec"]
-
-            receiver_id = req_disagg_spec["receiver_host"] + str(
-                req_disagg_spec["receiver_port"]
-            )
-            receiver_info = NixlReceiverInfo(
-                receiver_id=receiver_id,
-                receiver_host=req_disagg_spec["receiver_host"],
-                receiver_init_port=req_disagg_spec["receiver_init_port"],
-                receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
-            )
-
-            disagg_spec = DisaggSpec(
-                req_id=req_disagg_spec["req_id"],
-                receiver_info=receiver_info,
-            )
-
+        # NOTE: Intialized in `update_state_after_alloc`
+        disagg_spec = tmp_disagg_tracker.pop(
+            new_request.req_id, None
+        )
+        
         return RequestTracker(
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
@@ -257,6 +243,19 @@ class RequestTracker:
         else:
             new_block_ids = cached_request.new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
+    
+    def update_disagg_spec(self, disagg_spec: DisaggSpec) -> None:
+        """Update the disagg spec for the request tracker.
+
+        Args:
+            disagg_spec (DisaggSpec): the disagg spec for the request.
+        """
+        self.disagg_spec = disagg_spec
+        logger.debug(
+            "Updated disagg spec for request %s: %s",
+            self.req_id,
+            self.disagg_spec,
+        )
 
 
 @dataclass
@@ -271,6 +270,8 @@ class ReqMeta:
     save_spec: Optional[SaveSpec] = None
     # load_spec
     load_spec: Optional[LoadSpec] = None
+    # disagg spec
+    disagg_spec: Optional[DisaggSpec] = None
 
     @staticmethod
     def from_request_tracker(
@@ -372,6 +373,7 @@ class ReqMeta:
             slot_mapping=slot_mapping,
             save_spec=save_spec,
             load_spec=load_spec,
+            disagg_spec=tracker.disagg_spec,
         )
 
 
@@ -871,6 +873,29 @@ class LMCacheConnectorV1Impl:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
+        
+        kv_transfer_params = request.kv_transfer_params
+
+        if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
+            req_disagg_spec = kv_transfer_params["disagg_spec"]
+
+            receiver_id = req_disagg_spec["receiver_host"] + str(
+                req_disagg_spec["receiver_init_port"]
+            )
+            receiver_info = NixlReceiverInfo(
+                receiver_id=receiver_id,
+                receiver_host=req_disagg_spec["receiver_host"],
+                receiver_init_port=req_disagg_spec["receiver_init_port"],
+                receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+            )
+
+            disagg_spec = DisaggSpec(
+                req_id=req_disagg_spec["req_id"],
+                receiver_info=receiver_info,
+            )
+            
+            tmp_disagg_tracker[request.request_id] = disagg_spec
+        
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return

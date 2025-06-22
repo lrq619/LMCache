@@ -172,7 +172,7 @@ async def zmq_pull_server():
             break
 
     socket.close()
-    print("ZMQ PULL server stopped.")
+    logger.info("ZMQ PULL server stopped.")
 
 
 async def send_request_to_service(
@@ -226,7 +226,7 @@ async def handle_completions(request: Request):
         tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
 
         tokenize_output = await send_request_to_service(
-            tokenization_client, "/tokenize", {"prompt": req_data["prompt"]}
+            tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
         )
         tokenize_output = tokenize_output.json()
 

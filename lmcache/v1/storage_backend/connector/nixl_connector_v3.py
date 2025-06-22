@@ -95,7 +95,7 @@ NixlMsg = Union[
     NixlXferNotif,
 ]
 
-
+@dataclass
 class NixlReceiverInfo:
     receiver_id: str
     receiver_host: Optional[str] = None
@@ -508,7 +508,7 @@ class NixlReceiver:
                     time.sleep(0.01)
 
     def _init_loop(self):
-        while self.running:
+        while self._running:
             try:
                 init_req_bytes = self._init_side_channel.recv()
                 init_req = msgspec.msgpack.decode(init_req_bytes, type=NixlMsg)
@@ -607,6 +607,8 @@ class NixlChannel:
         self._sender = None
         self._receiver = None
 
+        self._backend = backend
+        
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config, config, backend)
         else:
@@ -637,15 +639,6 @@ class NixlChannel:
         sender = self._check_sender()
         sender.prepare_send(keys, mem_objs)
 
-    def local_allocate(
-        self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> Optional[MemoryObj]:
-        """Allocate the memory for send."""
-        return self._backend.local_allocate(shape, dtype, fmt)
-
     def close(self):
         """Close all resources."""
         if self._sender:
@@ -660,10 +653,10 @@ class NixlChannel:
 
 
 # TODO (Jiayi): support multiple protocols
-def get_zmq_path(host: str, port: int, protocol: str = "tcp") -> str:
+def get_zmq_path(url: str, protocol: str = "tcp") -> str:
     """Get the ZeroMQ path for the given base path and suffix."""
     if protocol == "tcp":
-        return f"tcp://{host}:{port}"
+        return f"tcp://{url}"
     raise ValueError(f"Unsupported protocol: {protocol}")
 
 
@@ -703,7 +696,8 @@ class NixlAgentWrapper:
 
         # Register the memory
         memory_desc = [(buffer_ptr, buffer_size, 0, "")]
-        reg_descs = nixl_agent.get_reg_descs(memory_desc)
+        # TODO(Jiayi): remove hardcode `mem_type`
+        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
         nixl_agent.register_memory(reg_descs)
 
         # Create xfer handlers
@@ -711,10 +705,11 @@ class NixlAgentWrapper:
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
             xfer_desc.append((base_addr, page_size, 0))
 
-        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc)
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs)
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
+        xfer_handler = nixl_agent.prep_xfer_dlist(
+            "", xfer_descs, mem_type="cuda")
 
-        self.nixl_agent = nixl_agent
+        self.agent = nixl_agent
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
         self.xfer_handler = xfer_handler
