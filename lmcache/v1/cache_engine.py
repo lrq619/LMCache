@@ -186,7 +186,7 @@ class LMCacheEngine:
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
-            
+
             # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
@@ -203,13 +203,11 @@ class LMCacheEngine:
 
             tot_kv_size = memory_obj.get_size()
 
-        self.gpu_connector.batched_from_gpu(
-            memory_objs, starts, ends, **kwargs)
+        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
 
         t = time.perf_counter()
-        self.storage_manager.batched_put(
-            keys, memory_objs, kwargs["transfer_spec"])
+        self.storage_manager.batched_put(keys, memory_objs, kwargs["transfer_spec"])
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -714,15 +712,15 @@ class LMCacheEngineBuilder:
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
-            if config.enabel_xpyd:
+            if config.enable_xpyd:
                 buffer = torch.tensor(
-                    metadata.kv_shape, 
-                    device=config.nixl_buffer_device)
+                    metadata.kv_shape, device=config.nixl_buffer_device
+                )
                 return PagedTensorMemoryAllocator(
                     buffer,
                     metadata.kv_shape,
                     metadata.kv_dtype,
-                    MemoryFormat.KV_T2D, # TODO: remove this hardcode
+                    MemoryFormat.KV_T2D,  # TODO: remove this hardcode
                 )
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 

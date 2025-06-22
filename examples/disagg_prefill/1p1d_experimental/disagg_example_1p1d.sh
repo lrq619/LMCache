@@ -121,48 +121,34 @@ main() {
         --port 9000 \
         --prefiller-host localhost \
         --prefiller-port 8100 \
-        --num-prefillers 2 \
+        --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 8200  \
         --decoder-init-port 8300 \
         --decoder-alloc-port 8400 \
         --proxy-host localhost \
         --proxy-port 8500 \
-        --num-decoders 2 \
+        --num-decoders 1 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
 
+
     # Launch the decoder
-    bash disagg_vllm_launcher.sh decoder1  \
-        > >(tee decoder1.log)  2>&1 &
+    bash disagg_vllm_launcher.sh decoder  \
+        > >(tee decoder.log)  2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    sleep 5
-    # Launch the second decoder 
-    bash disagg_vllm_launcher.sh decoder2  \
-        > >(tee decoder2.log)  2>&1 &
-    decoder_pid=$!
-    PIDS+=($decoder_pid)
-    wait_for_server 8200
-    wait_for_server 8201
 
-
-    # Launch the prefillers next
-    bash disagg_vllm_launcher.sh prefiller1 \
-        > >(tee prefiller1.log) 2>&1 &
+    # Launch the prefiller next
+    bash disagg_vllm_launcher.sh prefiller \
+        > >(tee prefiller.log) 2>&1 &
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
 
-    sleep 5  # Don't launch the second prefiller too quickly
-    bash disagg_vllm_launcher.sh prefiller2 \
-        > >(tee prefiller2.log) 2>&1 &
-    prefiller2_pid=$!
-    PIDS+=($prefiller2_pid)
-
+    wait_for_server 8200
     wait_for_server 8100
-    wait_for_server 8101
     wait_for_server 9000
 
     echo "==================================================="
