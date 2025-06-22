@@ -103,14 +103,14 @@ class NixlConfig:
 @dataclass
 class NixlConfigXpYd:
     role: Union[NixlRole, str]
-    
+
     peer_host: str
     peer_init_port: int
     peer_alloc_port: int
-    
+
     proxy_host: str
     proxy_port: int
-    
+
     buffer_size: int
     buffer_device: str
 
@@ -138,7 +138,7 @@ class NixlConfigXpYd:
 
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
-        
+
         if nixl_role == NixlRole.RECEIVER:
             assert config.nixl_peer_host is not None
             assert config.nixl_peer_init_port is not None
@@ -150,7 +150,7 @@ class NixlConfigXpYd:
             config.nixl_buffer_device, metadata.worker_id
         )
 
-        return NixlConfig(
+        return NixlConfigXpYd(
             role=nixl_role,
             peer_host=config.nixl_peer_host,
             peer_init_port=config.nixl_peer_init_port,

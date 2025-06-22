@@ -713,12 +713,14 @@ class LMCacheEngineBuilder:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
             if config.enable_xpyd:
-                buffer = torch.tensor(
-                    metadata.kv_shape, device=config.nixl_buffer_device
+                buffer = torch.empty(
+                    config.nixl_buffer_size,
+                    dtype=torch.uint8,
+                    device=config.nixl_buffer_device,
                 )
                 return PagedTensorMemoryAllocator(
                     buffer,
-                    metadata.kv_shape,
+                    torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
                     MemoryFormat.KV_T2D,  # TODO: remove this hardcode
                 )

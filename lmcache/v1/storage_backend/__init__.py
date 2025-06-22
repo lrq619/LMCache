@@ -61,7 +61,7 @@ def CreateStorageBackends(
             from lmcache.v1.storage_backend.nixl_backend_v3 import NixlBackend
 
             storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-                config, metadata
+                config, metadata, memory_allocator
             )
             assert config.nixl_buffer_device is not None
             return storage_backends

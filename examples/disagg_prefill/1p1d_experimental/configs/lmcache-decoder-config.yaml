@@ -2,6 +2,7 @@ local_cpu: False
 max_local_cpu_size: 0
 
 enable_nixl: True
+enable_xpyd: True
 nixl_role: "receiver"
 nixl_peer_host: "localhost"
 nixl_peer_init_port: 8300

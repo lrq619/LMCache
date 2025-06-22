@@ -15,9 +15,6 @@
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
-from queue import Queue, Empty
-import threading
-import time
 
 # Third Party
 import torch
@@ -28,6 +25,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
 )
@@ -35,10 +33,7 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlChannel,
 )
-from lmcache.v1.storage_backend.connector.nixl_utils import (
-    NixlConfigXpYd,
-    NixlRole
-)
+from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
 
 logger = init_logger(__name__)
 
@@ -55,9 +50,10 @@ class NixlBackend(StorageBackendInterface):
     """
 
     def __init__(
-        self, 
+        self,
         nixl_config: NixlConfigXpYd,
         config: LMCacheEngineConfig,
+        memory_allocator: MemoryAllocatorInterface,
     ):
         """
         Initialize the Nixl storage backend.
@@ -66,25 +62,22 @@ class NixlBackend(StorageBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
-        
+
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
         self._data: dict[CacheEngineKey, MemoryObj] = {}
-        
+
         # FIXME(Jiayi): do we need this lock?
         # self._data_lock = threading.Lock()
 
-        self._nixl_channel = NixlChannel(
-            nixl_config, config, self)
-        
         assert nixl_config.role in [
             NixlRole.SENDER,
             NixlRole.RECEIVER,
         ], "Nixl role must be either SENDER or RECEIVER."
-        
-        # TODO(Jiayi): make this outside backend initialization
-        # FIXME:
-        self.memory_allocator 
+
+        self.memory_allocator = memory_allocator
+
+        self._nixl_channel = NixlChannel(nixl_config, config, self)
 
     # TODO(Jiayi): handle `pin` smantics
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -127,24 +120,24 @@ class NixlBackend(StorageBackendInterface):
         This will be seen as "adding a new payload" to the backend.
         """
 
-        mem_obj = self._nixl_channel.local_allocate(
-            shape=shape, dtype=dtype, fmt=fmt)
-        
+        mem_obj = self._nixl_channel.local_allocate(shape=shape, dtype=dtype, fmt=fmt)
+
         # NOTE: The following will never happen since `local_allocate`
         # will always wait for a valid MemoryObj.
-        assert mem_obj is not None, \
+        assert mem_obj is not None, (
             "Failed to allocate zero-copy buffer from nixl_channel"
-        
+        )
+
         return mem_obj
 
     def batched_submit_put_task(
         self,
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec = None,
+        transfer_spec=None,
     ) -> Optional[List[Future]]:
         self._nixl_channel.prepare_send(
-            keys=keys, 
+            keys=keys,
             mem_objs=memory_objs,
             transfer_spec=transfer_spec,
         )
@@ -168,12 +161,12 @@ class NixlBackend(StorageBackendInterface):
 
         :return: MemoryObj. None if the key does not exist.
         """
-        
+
         # NOTE(Jiayi): we assume that the key must be in local data
         # because we are using a push-based transfer
         mem_obj = self._data.get(key, None)
         assert mem_obj is not None, f"Key {key} not found in local data."
-        
+
         return mem_obj
 
     def get_non_blocking(
@@ -196,7 +189,6 @@ class NixlBackend(StorageBackendInterface):
         """
         self._nixl_channel.close()
 
-
     def pin(self, key: CacheEngineKey) -> bool:
         raise NotImplementedError
 
@@ -206,7 +198,9 @@ class NixlBackend(StorageBackendInterface):
     # TODO (Jiayi): put this in _init__.py later
     @staticmethod
     def CreateNixlBackend(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        memory_allocator: MemoryAllocatorInterface,
     ) -> "NixlBackend":
         """
         Create a Nixl backend with the given configuration.
@@ -219,5 +213,5 @@ class NixlBackend(StorageBackendInterface):
         # Create the Nixl config
         nixl_config = NixlConfigXpYd.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
-        backend = NixlBackend(nixl_config, config)
+        backend = NixlBackend(nixl_config, config, memory_allocator)
         return backend
