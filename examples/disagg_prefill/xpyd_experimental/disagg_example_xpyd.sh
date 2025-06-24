@@ -116,18 +116,18 @@ main() {
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
     # Launch the proxy first
-    python3 disagg_proxy_server_first_token_from_prefiller.py \
+    python3 disagg_proxy_server.py \
         --host localhost \
-        --port 9000 \
+        --port 9100 \
         --prefiller-host localhost \
-        --prefiller-port 8100 \
+        --prefiller-port 7100 \
         --num-prefillers 2 \
         --decoder-host localhost \
-        --decoder-port 8200  \
-        --decoder-init-port 8300 \
-        --decoder-alloc-port 8400 \
+        --decoder-port 7200  \
+        --decoder-init-port 7300 \
+        --decoder-alloc-port 7400 \
         --proxy-host localhost \
-        --proxy-port 8500 \
+        --proxy-port 7500 \
         --num-decoders 2 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
@@ -145,8 +145,8 @@ main() {
         > >(tee decoder2.log)  2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
-    wait_for_server 8200
-    wait_for_server 8201
+    wait_for_server 7200
+    wait_for_server 7201
 
 
     # Launch the prefillers next
@@ -161,9 +161,9 @@ main() {
     prefiller2_pid=$!
     PIDS+=($prefiller2_pid)
 
-    wait_for_server 8100
-    wait_for_server 8101
-    wait_for_server 9000
+    wait_for_server 7100
+    wait_for_server 7101
+    wait_for_server 9100
 
     echo "==================================================="
     echo "All servers are up. You can send request now..."

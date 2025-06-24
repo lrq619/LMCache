@@ -1,4 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2024-2025 LMCache Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Standard
 from contextlib import asynccontextmanager
@@ -54,6 +66,7 @@ async def lifespan(app: FastAPI):
                 decode_client,
                 global_args.decoder_host,
                 global_args.decoder_init_port + i,
+                global_args.decoder_alloc_port + i,
             )
         )
 
@@ -172,7 +185,7 @@ async def zmq_pull_server():
             break
 
     socket.close()
-    print("ZMQ PULL server stopped.")
+    logger.info("ZMQ PULL server stopped.")
 
 
 async def send_request_to_service(
@@ -210,7 +223,8 @@ def round_robin_pick_client(clients, idx):
 async def wait_decode_kv_ready(req_id: str):
     while req_id not in app.state.finished_reqs:
         await asyncio.sleep(0.0001)  # sleep for 0.1 ms
-    app.state.finished_reqs.pop(req_id)
+    logger.debug(f"Prefill node signaled kv ready for req {req_id}")
+    app.state.finished_reqs.remove(req_id)
 
 
 @app.post("/v1/completions")
@@ -226,7 +240,7 @@ async def handle_completions(request: Request):
         tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
 
         tokenize_output = await send_request_to_service(
-            tokenization_client, "/tokenize", {"prompt": req_data["prompt"]}
+            tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
         )
         tokenize_output = tokenize_output.json()
 
@@ -314,6 +328,7 @@ async def handle_completions(request: Request):
         raise
 
 
+# FIXME (Jiayi): chat completion support need to apply prompt template
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     global counter, stats_calculator
