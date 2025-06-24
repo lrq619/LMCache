@@ -32,7 +32,11 @@ import vllm.envs as envs
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.integration.vllm.utils import (
+    ENGINE_NAME,
+    apply_mm_hashes_to_token_ids,
+    lmcache_get_config,
+)
 from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
     from vllm.v1.request import Request
@@ -187,6 +192,10 @@ class RequestTracker:
     # Disagg spec for the request
     disagg_spec: Optional[DisaggSpec] = None
 
+    # Multimodal hashes and positions
+    mm_hashes: Optional[list[str]] = None
+    mm_positions: Optional[list["PlaceholderRange"]] = None
+
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -230,6 +239,8 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,  # TODO (Jiayi): this might be suboptimal
             disagg_spec=disagg_spec,
+            mm_hashes=new_request.mm_hashes.copy(),
+            mm_positions=new_request.mm_positions.copy(),
         )
 
     def update(
@@ -241,9 +252,12 @@ class RequestTracker:
         """
 
         self.token_ids.extend(cached_request.new_token_ids)
+
         new_block_ids: list[int]
 
-        if not isinstance(cached_request.new_block_ids[0], list):
+        if len(cached_request.new_block_ids) == 0:
+            new_block_ids = []
+        elif not isinstance(cached_request.new_block_ids[0], list):
             new_block_ids = cached_request.new_block_ids
         else:
             new_block_ids = cached_request.new_block_ids[0]
@@ -331,6 +345,12 @@ class ReqMeta:
         # ids
         token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
 
+        # If the request has multimodal hashes, apply them to the token ids
+        if tracker.mm_hashes:
+            apply_mm_hashes_to_token_ids(
+                token_ids, tracker.mm_hashes, tracker.mm_positions
+            )
+
         num_blocks = len(tracker.allocated_block_ids)
 
         block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
@@ -406,7 +426,7 @@ class LMCacheConnectorV1Impl:
         is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
 
         config = lmcache_get_config()
-
+        self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
         else:
@@ -539,6 +559,7 @@ class LMCacheConnectorV1Impl:
                 tokens = tokens[: -self.skip_last_n_tokens]
                 token_mask = token_mask[: -self.skip_last_n_tokens]
 
+            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
                 assert isinstance(self.lmcache_engine, LayerwiseLMCacheEngine)
                 if idx == last_idx:
@@ -556,10 +577,10 @@ class LMCacheConnectorV1Impl:
                 else:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens,
-                        token_mask,
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -568,10 +589,10 @@ class LMCacheConnectorV1Impl:
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens,
-                    token_mask,
+                    tokens[:lmcache_cached_tokens],
+                    token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
+                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
                 )
 
                 # Check the result
@@ -837,10 +858,18 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+
         if self.kv_role == "kv_producer":
             return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
+
+        # If the request has multimodal hashes, apply them to the token ids
+        if request.mm_hashes:
+            apply_mm_hashes_to_token_ids(
+                token_ids, request.mm_hashes, request.mm_positions
+            )
+
         if self.skip_last_n_tokens > 0:
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens]

@@ -124,6 +124,10 @@ class LMCacheEngineConfig:
     # But in some scenarios, such as reuse, save unfull chunk is unnecessary
     save_unfull_chunk: bool = True
 
+    # Set timeout(seconds) to improve lmcache stability
+    # when calling get_blocking method in remote backend
+    blocking_timeout_secs: int = 10
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -166,6 +170,7 @@ class LMCacheEngineConfig:
         cufile_buffer_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
+        blocking_timeout_secs: int = 10,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -209,6 +214,7 @@ class LMCacheEngineConfig:
             cufile_buffer_size,
             extra_config,
             save_unfull_chunk,
+            blocking_timeout_secs,
         ).validate()
 
     @staticmethod
@@ -379,6 +385,8 @@ class LMCacheEngineConfig:
 
         save_unfull_chunk = config.get("save_unfull_chunk", True)
 
+        blocking_timeout_secs = config.get("blocking_timeout_secs", 10)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -431,6 +439,7 @@ class LMCacheEngineConfig:
                 cufile_buffer_size,
                 extra_config,
                 save_unfull_chunk,
+                blocking_timeout_secs,
             )
             .validate()
             .log_config()
@@ -634,6 +643,11 @@ class LMCacheEngineConfig:
         config.save_unfull_chunk = to_bool(
             parse_env(get_env_name("save_unfull_chunk"), config.save_unfull_chunk)
         )
+        config.blocking_timeout_secs = to_int(
+            parse_env(
+                get_env_name("blocking_timeout_secs"), config.blocking_timeout_secs
+            )
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -719,6 +733,7 @@ class LMCacheEngineConfig:
             "gds_path": self.gds_path,
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
+            "blocking_timeout_secs": self.blocking_timeout_secs,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
