@@ -15,6 +15,7 @@
 # Standard
 from concurrent.futures import Future
 from typing import List, Optional
+import threading
 
 # Third Party
 import torch
@@ -67,8 +68,7 @@ class NixlBackend(StorageBackendInterface):
         # only receiver/decoder will.
         self._data: dict[CacheEngineKey, MemoryObj] = {}
 
-        # FIXME(Jiayi): do we need this lock?
-        # self._data_lock = threading.Lock()
+        self._data_lock = threading.Lock()
 
         assert nixl_config.role in [
             NixlRole.SENDER,
@@ -89,7 +89,8 @@ class NixlBackend(StorageBackendInterface):
 
         :return: True if the key exists, False otherwise
         """
-        return key in self._data
+        with self._data_lock:
+            return key in self._data
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -105,7 +106,8 @@ class NixlBackend(StorageBackendInterface):
         key: CacheEngineKey,
         mem_obj: MemoryObj,
     ):
-        self._data[key] = mem_obj
+        with self._data_lock:
+            self._data[key] = mem_obj
 
     def allocate(
         self,
@@ -119,14 +121,10 @@ class NixlBackend(StorageBackendInterface):
 
         This will be seen as "adding a new payload" to the backend.
         """
+        
+        # NOTE: no eviction in PD
 
         mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
-
-        # NOTE: The following will never happen since `local_allocate`
-        # will always wait for a valid MemoryObj.
-        assert mem_obj is not None, (
-            "Failed to allocate zero-copy buffer from nixl_channel"
-        )
 
         return mem_obj
 
@@ -136,6 +134,10 @@ class NixlBackend(StorageBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> Optional[List[Future]]:
+
+        for mem_obj in memory_objs:
+            mem_obj.ref_count_up()
+
         self._nixl_channel.prepare_send(
             keys=keys,
             mem_objs=memory_objs,
@@ -162,12 +164,21 @@ class NixlBackend(StorageBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        # NOTE(Jiayi): we assume that the key must be in local data
-        # because we are using a push-based transfer
-        mem_obj = self._data.get(key, None)
-        assert mem_obj is not None, f"Key {key} not found in local data."
+        with self._data_lock:
+            # NOTE(Jiayi): we assume that the key must be in local data
+            # because we are using a push-based transfer
+            mem_obj = self._data.pop(key, None)
+            assert mem_obj is not None, f"Key {key} not found in local data."
+            
+            # NOTE(Jiayi): Currently, we remove the cache from local storage
+            # buffer (on decode node) after it is retrieved.
+            # Another option is to keep it in the local storage buffer and 
+            # enable eviction when a new alloc request comes in.
+            # To so the second option, we need to ref_count_up or pin here
+            # and not use pop above.
+            # The second option can potentially make PD and KV reuse compatible.
 
-        return mem_obj
+            return mem_obj
 
     def get_non_blocking(
         self,
@@ -181,7 +192,8 @@ class NixlBackend(StorageBackendInterface):
 
         :param key: The key to remove.
         """
-        return self._data.pop(key, None) is not None
+        with self._data_lock:
+            return self._data.pop(key, None) is not None
 
     def close(self) -> None:
         """

@@ -143,6 +143,7 @@ class NixlConfigXpYd:
             assert config.nixl_peer_host is not None
             assert config.nixl_peer_init_port is not None
             assert config.nixl_peer_alloc_port is not None
+        elif nixl_role == NixlRole.SENDER:
             assert config.nixl_proxy_host is not None
             assert config.nixl_proxy_port is not None
 

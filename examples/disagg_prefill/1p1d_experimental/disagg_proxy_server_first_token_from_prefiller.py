@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
                 decode_client,
                 global_args.decoder_host,
                 global_args.decoder_init_port + i,
+                global_args.decoder_alloc_port + i,
             )
         )
 
@@ -210,7 +211,8 @@ def round_robin_pick_client(clients, idx):
 async def wait_decode_kv_ready(req_id: str):
     while req_id not in app.state.finished_reqs:
         await asyncio.sleep(0.0001)  # sleep for 0.1 ms
-    app.state.finished_reqs.pop(req_id)
+    logger.debug(f"Prefill node signaled kv ready for req {req_id}")
+    app.state.finished_reqs.remove(req_id)
 
 
 @app.post("/v1/completions")

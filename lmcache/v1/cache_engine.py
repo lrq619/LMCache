@@ -201,7 +201,7 @@ class LMCacheEngine:
             keys.append(key)
             memory_objs.append(memory_obj)
 
-            tot_kv_size = memory_obj.get_size()
+            tot_kv_size += memory_obj.get_size()
 
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
@@ -289,6 +289,8 @@ class LMCacheEngine:
             # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             memory_obj.ref_count_down()
+            
+            logger.debug(f"Num activations: {self.memory_allocator.num_active_allocations}")
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
@@ -712,11 +714,23 @@ class LMCacheEngineBuilder:
     ) -> MemoryAllocatorInterface:
         if config.enable_nixl:
             assert config.nixl_buffer_device is not None
+            # TODO (Jiayi): make this less hacky
             if config.enable_xpyd:
+                from lmcache.v1.storage_backend.connector.nixl_utils import (
+                    get_correct_nixl_device
+                )
+                corrected_device = get_correct_nixl_device(
+                    config.nixl_buffer_device,
+                    metadata.worker_id,
+                )
+                logger.info(
+                    f"Setting cuda device to {corrected_device} "
+                )
+                torch.cuda.set_device(corrected_device)
                 buffer = torch.empty(
                     config.nixl_buffer_size,
                     dtype=torch.uint8,
-                    device=config.nixl_buffer_device,
+                    device=corrected_device,
                 )
                 return PagedTensorMemoryAllocator(
                     buffer,

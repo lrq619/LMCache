@@ -158,6 +158,7 @@ class SaveSpec:
 class DisaggSpec:
     req_id: str
     receiver_info: NixlReceiverInfo
+    is_last_prefill: bool = False
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
@@ -166,6 +167,9 @@ class RequestTracker:
     # Request id
     req_id: str
 
+    # Total prompt token length
+    prompt_len: int
+    
     # The token ids that has been scheduled so far
     token_ids: list[int]
 
@@ -221,6 +225,7 @@ class RequestTracker:
         
         return RequestTracker(
             req_id=new_request.req_id,
+            prompt_len=len(new_request.prompt_token_ids),
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,  # TODO (Jiayi): this might be suboptimal
@@ -243,19 +248,6 @@ class RequestTracker:
         else:
             new_block_ids = cached_request.new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
-    
-    def update_disagg_spec(self, disagg_spec: DisaggSpec) -> None:
-        """Update the disagg spec for the request tracker.
-
-        Args:
-            disagg_spec (DisaggSpec): the disagg spec for the request.
-        """
-        self.disagg_spec = disagg_spec
-        logger.debug(
-            "Updated disagg spec for request %s: %s",
-            self.req_id,
-            self.disagg_spec,
-        )
 
 
 @dataclass
@@ -266,6 +258,10 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mapping
     slot_mapping: torch.Tensor
+    
+    # Whether is last prefill or not
+    is_last_prefill: bool = False
+    
     # Skip save or not
     save_spec: Optional[SaveSpec] = None
     # load_spec
@@ -298,6 +294,10 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
+        
+        is_last_prefill = False
+        if input_token_len == tracker.prompt_len:
+            is_last_prefill = True
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -371,6 +371,7 @@ class ReqMeta:
             req_id=tracker.req_id,
             token_ids=token_ids,
             slot_mapping=slot_mapping,
+            is_last_prefill=is_last_prefill,
             save_spec=save_spec,
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
@@ -761,10 +762,10 @@ class LMCacheConnectorV1Impl:
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
             # transmit the already saved tokens again.
-            # skip_leading_tokens = max(
-            #    self.lmcache_engine.lookup(token_ids),
-            #    save_spec.skip_leading_tokens,
-            # )
+            skip_leading_tokens = max(
+                self.lmcache_engine.lookup(token_ids),
+                save_spec.skip_leading_tokens,
+            )
             skip_leading_tokens = save_spec.skip_leading_tokens
 
             if skip_leading_tokens == len(token_ids):
@@ -787,6 +788,19 @@ class LMCacheConnectorV1Impl:
                 skip_leading_tokens,
                 request.req_id,
             )
+            
+            is_last_prefill = request.is_last_prefill
+            if is_last_prefill:
+                request.disagg_spec.is_last_prefill = True
+                token_len = len(token_ids)
+                aligned_token_len = (
+                    token_len // self._lmcache_chunk_size
+                    * self._lmcache_chunk_size
+                )
+                token_ids = token_ids[:aligned_token_len]
+                store_mask = store_mask[:aligned_token_len]
+                slot_mapping = slot_mapping[:aligned_token_len]
+                
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,

@@ -870,8 +870,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.parent_allocator = self
 
         num_elements = shape.numel()
-        bytes_per_element = torch.tensor([], dtype=dtype).element_size()
-        self.align_bytes = num_elements * bytes_per_element
+        self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
+        self.align_bytes = num_elements * self.bytes_per_element
 
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
@@ -908,6 +908,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debugging purposes
         self.num_active_allocations = 0
+        self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -942,12 +943,18 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # TODO (Jiayi): This is a bit redundant.
         free_block.meta.shape = shape
         free_block.meta.fmt = fmt
+        free_block.meta.ref_count = 1
+        
+        if shape != self.shape:
+            size_in_bytes = shape.numel() * self.bytes_per_element
+            free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.num_active_allocations += 1
+        self.total_allocated_size += self.align_bytes
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations * self.align_bytes
+            self.total_allocated_size
         )
 
         # Allocate the block
@@ -983,17 +990,24 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.batched_free(allocated_blocks)
                 return None
 
-            # FIXME: think about whether fmt and pareant_allocator
+            # FIXME: think about whether pareant_allocator
             # should be updated here.
             free_block.meta.shape = shape
+            free_block.meta.fmt = fmt
+            free_block.meta.ref_count = 1
+        
+            if shape != self.shape:
+                size_in_bytes = shape.numel() * self.bytes_per_element
+                free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
             allocated_blocks.append(free_block)
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         self.num_active_allocations += batch_size
+        self.total_allocated_size = self.num_active_allocations * self.align_bytes
         self.stats_monitor.update_local_cache_usage(
-            self.num_active_allocations * self.align_bytes
+            self.total_allocated_size
         )
 
         # Allocate the block
@@ -1003,10 +1017,13 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
             return
-
+        if memory_obj.meta.shape != self.shape:
+            page_idx = memory_obj.meta.address
+            memory_obj.raw_data = self.paged_buffers[page_idx]
+        
         self.free_blocks.append(memory_obj)
 
-        memory_obj.invalidate()
+        # memory_obj.invalidate()
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
@@ -1026,7 +1043,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             if not memory_obj.is_valid():
                 logger.warning("Trying to free an invalidated MemoryObj")
                 continue
-            memory_obj.invalidate()
+            # memory_obj.invalidate()
+            if memory_obj.meta.shape != self.shape:
+                page_idx = memory_obj.meta.address
+                memory_obj.raw_data = self.paged_buffers[page_idx]
+            
             self.free_blocks.append(memory_obj)
 
         num_freed_blocks = len(memory_objs)
