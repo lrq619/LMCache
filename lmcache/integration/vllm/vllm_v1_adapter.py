@@ -792,6 +792,7 @@ class LMCacheConnectorV1Impl:
             is_last_prefill = request.is_last_prefill
             if is_last_prefill:
                 request.disagg_spec.is_last_prefill = True
+            else:
                 token_len = len(token_ids)
                 aligned_token_len = (
                     token_len // self._lmcache_chunk_size

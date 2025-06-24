@@ -29,6 +29,7 @@ if [[ $1 == "prefiller" ]]; then
         --port 7100 \
         --disable-log-requests \
         --enforce-eager \
+        --no-enable-prefix-caching \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
@@ -48,6 +49,7 @@ elif [[ $1 == "decoder" ]]; then
         --port 7200 \
         --disable-log-requests \
         --enforce-eager \
+        --no-enable-prefix-caching \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
 

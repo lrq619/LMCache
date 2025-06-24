@@ -177,6 +177,9 @@ class NixlBackend(StorageBackendInterface):
             # To so the second option, we need to ref_count_up or pin here
             # and not use pop above.
             # The second option can potentially make PD and KV reuse compatible.
+            
+            # NOTE(Jiayi): Another thing to be noted is that there could be memory 
+            # leak in decoder buffer when prefix caching is enabled.
 
             return mem_obj
 

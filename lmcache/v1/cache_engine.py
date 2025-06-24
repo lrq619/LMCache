@@ -207,7 +207,12 @@ class LMCacheEngine:
         offload_time += time.perf_counter() - t
 
         t = time.perf_counter()
-        self.storage_manager.batched_put(keys, memory_objs, kwargs["transfer_spec"])
+        
+        transfer_spec = None
+        if "transfer_spec" in kwargs:
+            transfer_spec = kwargs["transfer_spec"]
+        self.storage_manager.batched_put(
+            keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -290,8 +295,6 @@ class LMCacheEngine:
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             memory_obj.ref_count_down()
             
-            logger.debug(f"Num activations: {self.memory_allocator.num_active_allocations}")
-
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
