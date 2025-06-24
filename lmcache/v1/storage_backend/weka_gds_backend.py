@@ -312,10 +312,10 @@ class WekaGdsBackend(StorageBackendInterface):
         return future
 
     def batched_submit_put_task(
-        self, 
+        self,
         keys: List[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec = None,
+        transfer_spec=None,
     ) -> Optional[List[Future]]:
         return [
             self.submit_put_task(key, memory_obj)

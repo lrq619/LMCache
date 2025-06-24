@@ -160,7 +160,9 @@ class DisaggSpec:
     receiver_info: NixlReceiverInfo
     is_last_prefill: bool = False
 
+
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
+
 
 @dataclass
 class RequestTracker:
@@ -169,7 +171,7 @@ class RequestTracker:
 
     # Total prompt token length
     prompt_len: int
-    
+
     # The token ids that has been scheduled so far
     token_ids: list[int]
 
@@ -218,11 +220,9 @@ class RequestTracker:
             # updated accordingly.
             unfolded_block_ids = new_request.block_ids[0].copy()
 
-        # NOTE: Intialized in `update_state_after_alloc`
-        disagg_spec = tmp_disagg_tracker.pop(
-            new_request.req_id, None
-        )
-        
+        # NOTE: Initialized in `update_state_after_alloc`
+        disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -258,10 +258,10 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mapping
     slot_mapping: torch.Tensor
-    
+
     # Whether is last prefill or not
     is_last_prefill: bool = False
-    
+
     # Skip save or not
     save_spec: Optional[SaveSpec] = None
     # load_spec
@@ -294,7 +294,7 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
-        
+
         is_last_prefill = False
         if input_token_len == tracker.prompt_len:
             is_last_prefill = True
@@ -788,20 +788,19 @@ class LMCacheConnectorV1Impl:
                 skip_leading_tokens,
                 request.req_id,
             )
-            
+
             is_last_prefill = request.is_last_prefill
             if is_last_prefill:
                 request.disagg_spec.is_last_prefill = True
             else:
                 token_len = len(token_ids)
                 aligned_token_len = (
-                    token_len // self._lmcache_chunk_size
-                    * self._lmcache_chunk_size
+                    token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
                 )
                 token_ids = token_ids[:aligned_token_len]
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
-                
+
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
@@ -888,7 +887,7 @@ class LMCacheConnectorV1Impl:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
-        
+
         kv_transfer_params = request.kv_transfer_params
 
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
@@ -908,9 +907,9 @@ class LMCacheConnectorV1Impl:
                 req_id=req_disagg_spec["req_id"],
                 receiver_info=receiver_info,
             )
-            
+
             tmp_disagg_tracker[request.request_id] = disagg_spec
-        
+
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return

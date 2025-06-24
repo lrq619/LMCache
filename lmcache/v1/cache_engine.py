@@ -207,12 +207,11 @@ class LMCacheEngine:
         offload_time += time.perf_counter() - t
 
         t = time.perf_counter()
-        
+
         transfer_spec = None
         if "transfer_spec" in kwargs:
             transfer_spec = kwargs["transfer_spec"]
-        self.storage_manager.batched_put(
-            keys, memory_objs, transfer_spec=transfer_spec)
+        self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -294,7 +293,7 @@ class LMCacheEngine:
             # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             memory_obj.ref_count_down()
-            
+
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
@@ -719,16 +718,16 @@ class LMCacheEngineBuilder:
             assert config.nixl_buffer_device is not None
             # TODO (Jiayi): make this less hacky
             if config.enable_xpyd:
+                # First Party
                 from lmcache.v1.storage_backend.connector.nixl_utils import (
-                    get_correct_nixl_device
+                    get_correct_nixl_device,
                 )
+
                 corrected_device = get_correct_nixl_device(
                     config.nixl_buffer_device,
                     metadata.worker_id,
                 )
-                logger.info(
-                    f"Setting cuda device to {corrected_device} "
-                )
+                logger.info(f"Setting cuda device to {corrected_device} ")
                 torch.cuda.set_device(corrected_device)
                 buffer = torch.empty(
                     config.nixl_buffer_size,

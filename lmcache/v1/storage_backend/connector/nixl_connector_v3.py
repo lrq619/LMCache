@@ -50,6 +50,7 @@ class NixlMsgBase(msgspec.Struct, tag=True):
 
     pass
 
+
 class NixlAllocRequest(NixlMsgBase):
     """ """
 
@@ -65,16 +66,20 @@ class NixlAllocResponse(NixlMsgBase):
 
     remote_indexes: list[int]
 
+
 class NixlInitRequest(NixlMsgBase):
     sender_meta_bytes: bytes  # Metadata from the sender nixl agent
+
 
 class NixlMemRegRequest(NixlMsgBase):
     pass
 
+
 class NixlInitResponse(NixlMsgBase):
     receiver_meta_bytes: bytes  # Metadata from the receiver nixl agent
 
-class NixlMemRegResponse(NixlMsgBase): 
+
+class NixlMemRegResponse(NixlMsgBase):
     receiver_xfer_dlist_bytes: bytes  # Serialized transfer descriptors for the receiver
 
 
@@ -91,6 +96,7 @@ NixlMsg = Union[
     NixlMemRegRequest,
     NixlMemRegResponse,
 ]
+
 
 @dataclass
 class NixlReceiverInfo:
@@ -125,7 +131,7 @@ class NixlSenderTask:
         dtype = TORCH_DTYPE_TO_STR_DTYPE[self.mem_objs[0].meta.dtype]
         token_dim = fmt.token_dim()
         last_chunk_toks = self.mem_objs[-1].meta.shape[token_dim]
-        
+
         # TODO(Jiayi): Reomove this for loop
         keys = [key.to_string() for key in self.keys]
 
@@ -162,9 +168,9 @@ class NixlSender:
         assert nixl_config.role == NixlRole.SENDER, (
             "NixlSender should only be initialized with NixlRole.SENDER"
         )
-        
+
         self.device = nixl_config.buffer_device
-        
+
         self.nixl_config = nixl_config
 
         self.memory_allocator = backend.memory_allocator
@@ -184,19 +190,19 @@ class NixlSender:
         self.req_queue = Queue()
 
         self._remote_xfer_handlers_dict = {}
-        
+
         # Start the seder thread
         self._running = True
-        
+
         # self._sender_thread = threading.Thread(
         #     target=self._sender_loop, daemon=True
         # )
         # self._sender_thread.start()
-        
+
         proxy_host = nixl_config.proxy_host
         proxy_port = nixl_config.proxy_port
         proxy_url = f"{proxy_host}:{proxy_port}"
-        
+
         self._proxy_side_channel = self._context.socket(zmq.PUSH)
         self._proxy_side_channel.connect(get_zmq_path(proxy_url, protocol="tcp"))
 
@@ -216,7 +222,7 @@ class NixlSender:
             keys=keys,
             mem_objs=mem_objs,
         )
-        
+
         logger.debug(
             "Preparing to send %s objs with request ID: %s to receiver: %s",
             len(sender_task.keys),
@@ -224,8 +230,8 @@ class NixlSender:
             sender_task.receiver_info,
         )
 
-        #self.req_queue.put(sender_task)
-        
+        # self.req_queue.put(sender_task)
+
         req_id = sender_task.req_id
         receiver_id = sender_task.receiver_info.receiver_id
 
@@ -253,7 +259,7 @@ class NixlSender:
         local_indexes = sender_task.get_local_indexes()
         remote_indexes = alloc_response.remote_indexes
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
-        
+
         logger.debug(f"transfer spec: {transfer_spec}")
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
@@ -268,13 +274,13 @@ class NixlSender:
         self, receiver_id: str, alloc_request: NixlAllocRequest
     ) -> NixlAllocResponse:
         """Send the allocation request to the remote peer and get the response."""
-        
+
         logger.debug(
             "Sent allocation request to receiver %s with %s objs needed",
             receiver_id,
             len(alloc_request.keys),  # Use the first key as the request ID
         )
-        
+
         side_channel = self._mem_alloc_sockets[receiver_id]
 
         side_channel.send(msgspec.msgpack.encode(alloc_request))
@@ -284,8 +290,8 @@ class NixlSender:
         assert isinstance(alloc_response, NixlAllocResponse), (
             "The response from the remote peer is not a NixlAllocResponse"
         )
-        
-        logger.debug("Received alocation response.")
+
+        logger.debug("Received allocation response.")
 
         return alloc_response
 
@@ -316,11 +322,11 @@ class NixlSender:
             # notif_msg_bytes,
         )
 
-        # NOTE (Jiayi): cannot make this transfer in another thread, 
-        # giving error: `UCX  ERROR cuCtxGetDevice(&key.cu_device) 
+        # NOTE (Jiayi): cannot make this transfer in another thread,
+        # giving error: `UCX  ERROR cuCtxGetDevice(&key.cu_device)
         # failed: invalid device context`
         self._nixl_agent.transfer(handle)
-        
+
         # TODO (Jiayi): offload the following to another thread
         # TODO (Jiayi) tune hyperparameters
         wait_time = 0.0007
@@ -345,7 +351,7 @@ class NixlSender:
         receiver_id: str,
         receiver_init_url: NixlReceiverInfo,
     ) -> None:
-        """ 
+        """
         Initialize the NIXL sender connection with the receiver.
         """
 
@@ -365,7 +371,7 @@ class NixlSender:
 
         remote_meta_bytes = nixl_init_resp.receiver_meta_bytes
         remote_agent_name = self._nixl_agent.add_remote_agent(remote_meta_bytes)
-        
+
         # Register memory
         nixl_mem_reg_req = NixlMemRegRequest()
         init_tmp_socket.send(msgspec.msgpack.encode(nixl_mem_reg_req))
@@ -381,7 +387,7 @@ class NixlSender:
         self._remote_xfer_handlers_dict[receiver_id] = remote_xfer_handlers
 
         init_tmp_socket.close()
-        
+
     def _initialize_mem_alloc_side_channel(
         self, receiver_id: str, receiver_mem_alloc_url: str
     ) -> None:
@@ -412,7 +418,7 @@ class NixlSender:
             "Initializing all communication channels with receiver %s",
             receiver_info,
         )
-        
+
         receiver_id = receiver_info.receiver_id
         receiver_host = receiver_info.receiver_host
         receiver_init_port = receiver_info.receiver_init_port
@@ -426,7 +432,6 @@ class NixlSender:
 
         # Initialize the memory allocation side channel
         self._initialize_mem_alloc_side_channel(receiver_id, receiver_mem_alloc_url)
-
 
     def close(self):
         """Close the sender resources."""
@@ -480,7 +485,6 @@ class NixlReceiver:
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
-
         self.full_chunk_size = config.chunk_size
 
         # TODO (Jiayi)" make it async?"
@@ -530,11 +534,9 @@ class NixlReceiver:
                 shape[token_dim] = num_alloc_tokens
             else:
                 num_alloc_tokens = self.full_chunk_size
-            
-            mem_obj = self._backend.allocate(
-                torch.Size(shape), dtype, fmt
-            )
-            
+
+            mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+
             # TODO(Jiayi): tune this hyperparameters
             wait_time = 0.01
             decay = 1.1
@@ -544,9 +546,7 @@ class NixlReceiver:
                 )
                 time.sleep(wait_time)
                 wait_time /= decay
-                mem_obj = self._backend.allocate(
-                    torch.Size(shape), dtype, fmt
-                )
+                mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
 
             alloc_indexes.append(mem_obj.meta.address)
 
@@ -568,12 +568,12 @@ class NixlReceiver:
                 assert isinstance(alloc_req, NixlAllocRequest), (
                     "The request from the remote peer is not a NixlAllocRequest"
                 )
-                
+
                 logger.debug(
                     "Received allocation request for %s objs",
                     len(alloc_req.keys),
                 )
-                
+
                 # NOTE: it's okay to put the memory objs into the storage backend
                 # first because decode vllm will not be able to see the decode
                 # request until proxy receives the ack.
@@ -583,7 +583,7 @@ class NixlReceiver:
                     "Replying allocation response for %s objs",
                     len(alloc_resp.remote_indexes),
                 )
-                
+
                 # send back response
                 self._alloc_side_channel.send(msgspec.msgpack.encode(alloc_resp))
 
@@ -601,7 +601,7 @@ class NixlReceiver:
 
     def _init_loop(self):
         local_meta = self._nixl_agent.get_agent_metadata()
-        
+
         # NOTE: Initialization has to be two stages:
         # (1) Exchanging the metadata.
         # (2) Registering the memory descriptors.
@@ -610,9 +610,9 @@ class NixlReceiver:
         while self._running:
             try:
                 req_bytes = self._init_side_channel.recv()
-                
+
                 logger.debug("Received initialization request")
-                
+
                 req = msgspec.msgpack.decode(req_bytes, type=NixlMsg)
 
                 if isinstance(req, NixlInitRequest):
@@ -621,18 +621,18 @@ class NixlReceiver:
                     resp = NixlInitResponse(
                         receiver_meta_bytes=local_meta,
                     )
-                    
+
                     logger.debug("Replying initialization response")
 
                 elif isinstance(req, NixlMemRegRequest):
                     local_xfer_descs = self._nixl_agent.get_serialized_descs(
                         self._receiver_nixl_wrapper.xfer_descs
                     )
-                    
+
                     resp = NixlMemRegResponse(
                         receiver_xfer_dlist_bytes=local_xfer_descs,
                     )
-                
+
                     logger.debug("Replying mem register response")
 
                 self._init_side_channel.send(msgspec.msgpack.encode(resp))
@@ -680,7 +680,7 @@ class NixlChannel:
         self._receiver = None
 
         self._backend = backend
-        
+
         if nixl_config.role == NixlRole.SENDER:
             self._sender = NixlSender(nixl_config, config, backend)
         else:
@@ -704,7 +704,7 @@ class NixlChannel:
         self,
         keys: list[CacheEngineKey],
         mem_objs: list[MemoryObj],
-        transfer_spec = None,
+        transfer_spec=None,
     ):
         """Prepare a send transaction by sending the request using
         the side channel.
@@ -779,8 +779,7 @@ class NixlAgentWrapper:
             xfer_desc.append((base_addr, page_size, 0))
 
         xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist(
-            "", xfer_descs, mem_type="cuda")
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
 
         self.agent = nixl_agent
         self.reg_descs = reg_descs

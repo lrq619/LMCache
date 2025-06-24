@@ -121,7 +121,7 @@ class NixlBackend(StorageBackendInterface):
 
         This will be seen as "adding a new payload" to the backend.
         """
-        
+
         # NOTE: no eviction in PD
 
         mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
@@ -134,7 +134,6 @@ class NixlBackend(StorageBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec=None,
     ) -> Optional[List[Future]]:
-
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -169,16 +168,16 @@ class NixlBackend(StorageBackendInterface):
             # because we are using a push-based transfer
             mem_obj = self._data.pop(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
-            
+
             # NOTE(Jiayi): Currently, we remove the cache from local storage
             # buffer (on decode node) after it is retrieved.
-            # Another option is to keep it in the local storage buffer and 
+            # Another option is to keep it in the local storage buffer and
             # enable eviction when a new alloc request comes in.
             # To so the second option, we need to ref_count_up or pin here
             # and not use pop above.
             # The second option can potentially make PD and KV reuse compatible.
-            
-            # NOTE(Jiayi): Another thing to be noted is that there could be memory 
+
+            # NOTE(Jiayi): Another thing to be noted is that there could be memory
             # leak in decoder buffer when prefix caching is enabled.
 
             return mem_obj

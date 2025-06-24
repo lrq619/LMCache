@@ -70,6 +70,7 @@ TORCH_DTYPE_TO_STR_DTYPE = {
 
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
+
 @dataclass(order=True)
 class CacheEngineKey:
     fmt: str

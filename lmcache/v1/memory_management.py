@@ -944,7 +944,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.shape = shape
         free_block.meta.fmt = fmt
         free_block.meta.ref_count = 1
-        
+
         if shape != self.shape:
             size_in_bytes = shape.numel() * self.bytes_per_element
             free_block.raw_data = free_block.raw_data[:size_in_bytes]
@@ -953,9 +953,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += 1
         self.total_allocated_size += self.align_bytes
-        self.stats_monitor.update_local_cache_usage(
-            self.total_allocated_size
-        )
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
         return free_block
@@ -995,7 +993,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.shape = shape
             free_block.meta.fmt = fmt
             free_block.meta.ref_count = 1
-        
+
             if shape != self.shape:
                 size_in_bytes = shape.numel() * self.bytes_per_element
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
@@ -1006,9 +1004,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += batch_size
         self.total_allocated_size = self.num_active_allocations * self.align_bytes
-        self.stats_monitor.update_local_cache_usage(
-            self.total_allocated_size
-        )
+        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
         return free_block
@@ -1020,7 +1016,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         if memory_obj.meta.shape != self.shape:
             page_idx = memory_obj.meta.address
             memory_obj.raw_data = self.paged_buffers[page_idx]
-        
+
         self.free_blocks.append(memory_obj)
 
         # memory_obj.invalidate()
@@ -1047,7 +1043,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             if memory_obj.meta.shape != self.shape:
                 page_idx = memory_obj.meta.address
                 memory_obj.raw_data = self.paged_buffers[page_idx]
-            
+
             self.free_blocks.append(memory_obj)
 
         num_freed_blocks = len(memory_objs)

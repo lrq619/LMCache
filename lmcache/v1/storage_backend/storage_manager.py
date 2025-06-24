@@ -167,7 +167,7 @@ class StorageManager:
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec = None, # TODO(Jiayi): add type check
+        transfer_spec=None,  # TODO(Jiayi): add type check
     ) -> None:
         """
         Non-blocking function to batched put the memory objects into the
