@@ -833,7 +833,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         """ """
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
+        self.use_gpu = use_gpu
 
+        self.gpu_buffer_allocator = None
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -843,28 +845,54 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 "device should be provided to create a GPU buffer."
             )
 
-            max_tokens = kwargs.get("max_tokens", 32000)
+            self.max_tokens = kwargs.get("max_tokens", 32000)
             logger.info(
-                f"Using max_tokens={max_tokens} for VLLMPagedMemLayerwiseGPUConnector"
+                f"Max_tokens={self.max_tokens} is set for "
+                "VLLMPagedMemLayerwiseGPUConnector. However, this will not be used if "
+                "the number is smaller than the max number of tokens vllm can hold."
             )
-            shape = self.get_shape(max_tokens)
+            # shape = self.get_shape(max_tokens)
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
 
-            num_elements = shape.numel()
+            # num_elements = shape.numel()
 
             # All sizes are in bytes
-            element_size = torch.tensor([], dtype=self.dtype).element_size()
-            gpu_buffer_size = num_elements * element_size
-            self.gpu_buffer_allocator = GPUMemoryAllocator(
-                gpu_buffer_size, device=self.device
-            )
+            self.element_size = torch.tensor([], dtype=self.dtype).element_size()
+            # gpu_buffer_size = num_elements * element_size
+            # self.gpu_buffer_allocator = GPUMemoryAllocator(
+            #     gpu_buffer_size, device=self.device
+            # )
 
             self.load_stream = torch.cuda.Stream()
             self.store_stream = torch.cuda.Stream()
         else:
             # TODO(Jiayi): Support `use_gpu=False` case
             pass
+
+    def _lazy_initialize_buffer(self, kv_caches):
+        """
+        Lazily initialize the GPU buffer allocator if it is not initialized yet.
+        Currently, we use the `kv_caches` (kv cache pointer) to determine
+        the gpu buffer size in gpu connector.
+        Also, the first request might be a bit slower due to buffer creation.
+        """
+        if self.use_gpu and self.gpu_buffer_allocator is None:
+            logger.info("Lazily initializing GPU buffer.")
+            # NOTE (Jiayi): We use the first layer to determine the gpu buffer size.
+            # NOTE (Jiayi): Using the exact number of tokens in the first layer
+            # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
+            # in layerwise mode.
+            k_cache_shape_per_layer = kv_caches[0][0].shape
+            logger.info(
+                "Lazily initializing GPU buffer"
+                f" (max tokens={k_cache_shape_per_layer[0]})."
+            )
+            num_elements = k_cache_shape_per_layer.numel() * 2
+            gpu_buffer_size = num_elements * self.element_size
+            self.gpu_buffer_allocator = GPUMemoryAllocator(
+                gpu_buffer_size, device=self.device
+            )
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """ """
@@ -911,6 +939,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         sync: bool = kwargs["sync"]
+
+        self._lazy_initialize_buffer(kvcaches)
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
@@ -1015,6 +1045,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         sync: bool = kwargs["sync"]
+
+        self._lazy_initialize_buffer(kvcaches)
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
