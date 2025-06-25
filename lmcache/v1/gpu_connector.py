@@ -875,6 +875,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         Lazily initialize the GPU buffer allocator if it is not initialized yet.
         Currently, we use the `kv_caches` (kv cache pointer) to determine
         the gpu buffer size in gpu connector.
+        Also, the first request might be a bit slower due to buffer creation.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
             logger.info("Lazily initializing GPU buffer.")
@@ -939,8 +940,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         sync: bool = kwargs["sync"]
 
-        if self.use_gpu:
-            self._lazy_initialize_buffer(kvcaches)
+        self._lazy_initialize_buffer(kvcaches)
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
@@ -1046,8 +1046,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         sync: bool = kwargs["sync"]
 
-        if self.use_gpu:
-            self._lazy_initialize_buffer(kvcaches)
+        self._lazy_initialize_buffer(kvcaches)
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
