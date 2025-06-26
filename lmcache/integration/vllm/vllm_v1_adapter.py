@@ -146,6 +146,8 @@ class LoadSpec:
     lmcache_cached_tokens: int
     # Whether the scheduler allow us to load the tokens
     can_load: bool
+    # Whether the last token is recomputed during full hit
+    recompute_last_token: bool
 
 
 @dataclass
@@ -524,8 +526,8 @@ class LMCacheConnectorV1Impl:
                 token_mask = token_mask[: -self.skip_last_n_tokens]
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
-            vllm_cached_tokens = request.load_spec.vllm_cached_tokens
-            total_cached_tokens = lmcache_cached_tokens + vllm_cached_tokens
+            if request.load_spec.recompute_last_token:
+                lmcache_cached_tokens += 1
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
@@ -534,19 +536,18 @@ class LMCacheConnectorV1Impl:
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
-                    assert total_cached_tokens == lmcache_cached_tokens
                     self.blender.blend(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:total_cached_tokens],
-                        token_mask[:total_cached_tokens],
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:total_cached_tokens],
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -554,18 +555,17 @@ class LMCacheConnectorV1Impl:
                     next(layerwise_retriever)
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
+                # import pdb; pdb.set_trace()
                 ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens[:total_cached_tokens],
-                    token_mask[:total_cached_tokens],
+                    tokens[:lmcache_cached_tokens],
+                    token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:total_cached_tokens],
+                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
                 )
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                num_expected_tokens = (
-                    request.load_spec.lmcache_cached_tokens - self.skip_last_n_tokens
-                )
+                num_expected_tokens = lmcache_cached_tokens - self.skip_last_n_tokens
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
                         "The number of retrieved tokens is less than the "
@@ -826,8 +826,10 @@ class LMCacheConnectorV1Impl:
         # blocks are cached, we need to recompute the last token.
         # This will be removed in the future if vLLM's scheduler provides
         # a better support for this case.
+        recompute_last_token = False
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
+            recompute_last_token = True
 
         need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
@@ -846,6 +848,7 @@ class LMCacheConnectorV1Impl:
             vllm_cached_tokens=num_computed_tokens,
             lmcache_cached_tokens=num_external_hit_tokens,
             can_load=False,
+            recompute_last_token=recompute_last_token,
         )
 
         # TODO: Align to vLLM block size. Should test whether it can be removed
