@@ -28,7 +28,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, _lmcache_nvtx_annotate_segment
 
 logger = init_logger(__name__)
 
@@ -268,12 +268,12 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-
 class TensorMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
     """
 
+    @_lmcache_nvtx_annotate
     def __init__(
         self,
         raw_data: torch.Tensor,
@@ -283,7 +283,7 @@ class TensorMemoryObj(MemoryObj):
         self.raw_data = raw_data
         self.meta = metadata
         self.valid = True
-        self.lock = threading.Lock()
+        # self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
 
     def invalidate(self):
@@ -305,29 +305,29 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
-        with self.lock:
-            return self.meta.fmt
+        #with self.lock:
+        return self.meta.fmt
 
     def get_physical_size(self) -> int:
         return self.meta.phy_size
 
     def ref_count_up(self):
-        with self.lock:
-            self.meta.ref_count += 1
+        #with self.lock:
+        self.meta.ref_count += 1
 
     def ref_count_down(self):
-        with self.lock:
-            self.meta.ref_count -= 1
-            if (
-                self.meta.ref_count == 0
-                and self.parent_allocator is not None
-                and self.meta.is_pin is False
-            ):
-                self.parent_allocator.free(self)
+        #with self.lock:
+        self.meta.ref_count -= 1
+        if (
+            self.meta.ref_count == 0
+            and self.parent_allocator is not None
+            and self.meta.is_pin is False
+        ):
+            self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
-        with self.lock:
-            return self.meta.ref_count
+        #with self.lock:
+        return self.meta.ref_count
 
     def pin(self) -> bool:
         self.metadata.is_pin = True
@@ -339,8 +339,8 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def metadata(self) -> MemoryObjMetadata:
-        with self.lock:
-            return self.meta
+        #with self.lock:
+        return self.meta
 
     @property
     def tensor(self) -> Optional[torch.Tensor]:
@@ -654,69 +654,80 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         Batched allocate tensor memory objs with equal sizes.
         """
-        if not isinstance(shape, torch.Size):
-            shape = torch.Size(shape)
+        
+        with _lmcache_nvtx_annotate_segment("A"):
+            if not isinstance(shape, torch.Size):
+                shape = torch.Size(shape)
 
-        assert dtype is not None, "dtype must be specified"
+            assert dtype is not None, "dtype must be specified"
 
-        # Calculate the size of the tensor
-        unit_raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
+            # Calculate the size of the tensor
+            unit_raw_size = TensorMemoryAllocator._Compute_raw_size(shape, dtype)
 
-        if unit_raw_size % self.align_bytes != 0:
-            unit_aligned_size = TensorMemoryAllocator._Compute_aligned_size(
-                unit_raw_size, self.align_bytes
-            )
-        else:
-            unit_aligned_size = unit_raw_size
-
-        total_aligned_size = unit_aligned_size * batch_size
-
-        # Find the first block that fits the shape
-        for block in self.explicit_list:
-            if block.size >= total_aligned_size:
-                break
-        else:
-            logger.debug(
-                f"Failed to batched allocate memory for "
-                f"{batch_size} tensor({shape}, {dtype}) because "
-                "no memory is available"
-            )
-            return None
-
-        # Do not add the block back if `block.size == aligned_size`
-        self.explicit_list.remove(block)
-        # Update the explicit list
-        if block.size > total_aligned_size:
-            self.explicit_list.add(
-                FreeBlock(
-                    start=block.start + total_aligned_size,
-                    size=block.size - total_aligned_size,
+            if unit_raw_size % self.align_bytes != 0:
+                unit_aligned_size = TensorMemoryAllocator._Compute_aligned_size(
+                    unit_raw_size, self.align_bytes
                 )
+            else:
+                unit_aligned_size = unit_raw_size
+
+            total_aligned_size = unit_aligned_size * batch_size
+
+            # Find the first block that fits the shape
+            for block in self.explicit_list:
+                if block.size >= total_aligned_size:
+                    break
+            else:
+                logger.debug(
+                    f"Failed to batched allocate memory for "
+                    f"{batch_size} tensor({shape}, {dtype}) because "
+                    "no memory is available"
+                )
+                return None
+
+        with _lmcache_nvtx_annotate_segment("B"):
+            # Do not add the block back if `block.size == aligned_size`
+            self.explicit_list.remove(block)
+            # Update the explicit list
+            if block.size > total_aligned_size:
+                self.explicit_list.add(
+                    FreeBlock(
+                        start=block.start + total_aligned_size,
+                        size=block.size - total_aligned_size,
+                    )
+                )
+
+        with _lmcache_nvtx_annotate_segment("C"):
+            # TODO (Jiayi): need a flag to drop these debug ops
+            # Update debug status
+            self.total_allocated_size += total_aligned_size
+            self.num_active_allocations += batch_size
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+
+        with _lmcache_nvtx_annotate_segment("D"):
+            raw_datas = torch.chunk(
+                self.buffer[block.start : block.start + total_aligned_size],
+                batch_size,
             )
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # Update debug status
-        self.total_allocated_size += total_aligned_size
-        self.num_active_allocations += batch_size
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-
-        raw_datas = torch.chunk(
-            self.buffer[block.start : block.start + total_aligned_size],
-            batch_size,
-        )
-        tensor_mem_objs = []
-        temp_start = block.start
-        for raw_data in raw_datas:
-            tensor_mem_objs.append(
-                TensorMemoryObj(
-                    raw_data=raw_data,
-                    metadata=MemoryObjMetadata(
+            torch.cuda.synchronize()
+            
+        with _lmcache_nvtx_annotate_segment("E"):
+            tensor_mem_objs = []
+            temp_start = block.start
+            for raw_data in raw_datas:
+                with _lmcache_nvtx_annotate_segment("E1"):
+                    metadata = MemoryObjMetadata(
                         shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
-                    ),
-                    parent_allocator=parent_allocator,
-                )
-            )
-            temp_start += unit_aligned_size
+                    )
+                with _lmcache_nvtx_annotate_segment("E2"):
+                    tensor_mem_objs.append(
+                        TensorMemoryObj(
+                            raw_data=raw_data,
+                            metadata=metadata,
+                            parent_allocator=parent_allocator,
+                        )
+                    )
+                temp_start += unit_aligned_size
 
         return tensor_mem_objs
 

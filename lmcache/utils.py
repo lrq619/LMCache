@@ -228,6 +228,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         domain=domain,
     )(func)
 
+def _lmcache_nvtx_annotate_segment(message, domain="lmcache"):
+    """Decorator for applying nvtx annotations to methods in lmcache."""
+    return annotate(
+        message=message,
+        color=_get_color_for_nvtx(message),
+        domain=domain,
+    )
+
 
 ##### Observability Threading related #####
 _shared_observability_lock = threading.Lock()
