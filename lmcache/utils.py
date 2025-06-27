@@ -228,6 +228,7 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         domain=domain,
     )(func)
 
+
 def _lmcache_nvtx_annotate_segment(message, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache."""
     return annotate(

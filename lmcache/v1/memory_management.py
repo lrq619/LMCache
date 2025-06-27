@@ -268,6 +268,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+
 class TensorMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
@@ -305,18 +306,18 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.dtype
 
     def get_memory_format(self) -> MemoryFormat:
-        #with self.lock:
+        # with self.lock:
         return self.meta.fmt
 
     def get_physical_size(self) -> int:
         return self.meta.phy_size
 
     def ref_count_up(self):
-        #with self.lock:
+        # with self.lock:
         self.meta.ref_count += 1
 
     def ref_count_down(self):
-        #with self.lock:
+        # with self.lock:
         self.meta.ref_count -= 1
         if (
             self.meta.ref_count == 0
@@ -326,7 +327,7 @@ class TensorMemoryObj(MemoryObj):
             self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
-        #with self.lock:
+        # with self.lock:
         return self.meta.ref_count
 
     def pin(self) -> bool:
@@ -339,7 +340,7 @@ class TensorMemoryObj(MemoryObj):
 
     @property
     def metadata(self) -> MemoryObjMetadata:
-        #with self.lock:
+        # with self.lock:
         return self.meta
 
     @property
@@ -654,7 +655,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         Batched allocate tensor memory objs with equal sizes.
         """
-        
+
         with _lmcache_nvtx_annotate_segment("A"):
             if not isinstance(shape, torch.Size):
                 shape = torch.Size(shape)
@@ -710,7 +711,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 batch_size,
             )
             torch.cuda.synchronize()
-            
+
         with _lmcache_nvtx_annotate_segment("E"):
             tensor_mem_objs = []
             temp_start = block.start
