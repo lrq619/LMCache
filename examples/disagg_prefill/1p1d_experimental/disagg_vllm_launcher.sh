@@ -22,7 +22,7 @@ if [[ $1 == "prefiller" ]]; then
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
-        VLLM_ENABLE_V1_MULTIPROCESSING=4 \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
