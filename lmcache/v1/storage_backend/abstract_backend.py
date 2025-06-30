@@ -103,7 +103,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        A blcocking function to get the kv cache from the storage backend.
+        A blocking function to get the kv cache from the storage backend.
 
         :param CacheEngineKey key: The key of the MemoryObj.
 
