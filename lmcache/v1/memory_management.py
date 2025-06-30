@@ -486,7 +486,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[List[MemoryObj]]:
         """
         Batched allocate the memory to hold a tensor of the given shape.
 
@@ -514,7 +514,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Frees the memory allocated for the given list of MemoryObjs.
 
@@ -757,7 +757,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -806,13 +806,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             if not coalesced:
                 self.explicit_list.add(new_free_block)
 
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # Update debug status
-        self.total_allocated_size -= total_freed_size
-        self.num_active_allocations = max(
-            0, self.num_active_allocations - num_valid_blocks
-        )
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        if update_stats:
+            # TODO (Jiayi): need a flag to drop these debug ops
+            # Update debug status
+            self.total_allocated_size -= total_freed_size
+            self.num_active_allocations = max(
+                0, self.num_active_allocations - num_valid_blocks
+            )
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     def memcheck(self):
         """For debug purposes.
@@ -988,7 +989,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                     f"tensor({shape}, {dtype}) because "
                     "no free blocks is available"
                 )
-                self.batched_free(allocated_blocks)
+                self.batched_free(allocated_blocks, update_stats=False)
                 return None
 
             # FIXME: think about whether pareant_allocator
@@ -1012,7 +1013,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
-        return free_block
+        return allocated_blocks
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj):
@@ -1035,7 +1036,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         """
         Batched free memory objs.
         Unlike `batched_allocate`, this function does not
@@ -1053,17 +1054,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             self.free_blocks.append(memory_obj)
 
-        num_freed_blocks = len(memory_objs)
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # NOTE (Jiayi): the following code is not thread-safe but
-        # is tolerable as this is only used for debugging purposes.
-        # Update debug status
-        self.total_allocated_size -= self.align_bytes * num_freed_blocks
-        self.num_active_allocations = max(
-            0, self.num_active_allocations - num_freed_blocks
-        )
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        if update_stats:
+            num_freed_blocks = len(memory_objs)
+            # TODO (Jiayi): need a flag to drop these debug ops
+            # NOTE (Jiayi): the following code is not thread-safe but
+            # is tolerable as this is only used for debugging purposes.
+            # Update debug status
+            self.total_allocated_size -= self.align_bytes * num_freed_blocks
+            self.num_active_allocations = max(
+                0, self.num_active_allocations - num_freed_blocks
+            )
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
     def memcheck(self):
         """For debug purposes.
@@ -1128,7 +1129,7 @@ class BufferAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         return
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         return
 
     def memcheck(self):
@@ -1190,7 +1191,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1254,7 +1255,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             self.allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1356,7 +1357,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         # NOTE: fmts of all memory_objs should be the same
         fmt = memory_objs[0].meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
@@ -1441,7 +1442,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         with self.device_mem_lock:
             self.allocator.free(memory_obj)
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         with self.device_mem_lock:
             self.allocator.batched_free(memory_objs)
 
@@ -1507,7 +1508,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     def free(self, memory_obj: MemoryObj):
         pass
 
-    def batched_free(self, memory_objs: List[MemoryObj]):
+    def batched_free(self, memory_objs: List[MemoryObj], update_stats: bool = True):
         pass
 
     def ref_count_up(self, memory_obj: MemoryObj):
