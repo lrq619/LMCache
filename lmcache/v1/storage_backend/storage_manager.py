@@ -359,9 +359,9 @@ class StorageManager:
                 continue
 
             if backend.contains(key, pin):
-                return True
+                return backend_name
 
-        return False
+        return None
 
     def remove(
         self,

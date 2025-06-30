@@ -423,7 +423,9 @@ class LMCacheEngine:
                     start_mapping[location] = [start]
                     end_mapping[location] = [end]
                     continue
+
             assert location is not None
+
             key_mapping[location].append(key)
             start_mapping[location].append(start)
             end_mapping[location].append(end)
