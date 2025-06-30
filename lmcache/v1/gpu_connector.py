@@ -483,6 +483,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
+
+    # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
