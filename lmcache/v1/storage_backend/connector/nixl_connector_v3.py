@@ -258,6 +258,9 @@ class NixlSender:
         # send kv
         local_indexes = sender_task.get_local_indexes()
         remote_indexes = alloc_response.remote_indexes
+        if not remote_indexes:
+            raise RuntimeError(
+                f"Failed to allocate memory objects for request ID: {req_id}")
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
         logger.debug(f"transfer spec: {transfer_spec}")
@@ -540,16 +543,28 @@ class NixlReceiver:
             # TODO(Jiayi): tune this hyperparameters
             wait_time = 0.01
             decay = 1.1
+            max_retries = 5
+            retry_count = 0
             while mem_obj is None:
+                if retry_count >= max_retries:
+                    break
                 logger.warning(
                     "Failed to allocate memory object, retrying...",
                 )
                 time.sleep(wait_time)
                 wait_time /= decay
                 mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+                retry_count += 1
+
+            if mem_obj is None:
+                logger.warning(
+                    f"Failed to allocate memory object after {max_retries} retries, "
+                    "returning empty response.")
+                return NixlAllocResponse(remote_indexes=[])
 
             alloc_indexes.append(mem_obj.meta.address)
 
+            logger.info(f"Allocated memory object for key {key}")
             self._backend.put(CacheEngineKey.from_string(key), mem_obj)
 
         return NixlAllocResponse(remote_indexes=alloc_indexes)

@@ -817,18 +817,24 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids[:aligned_token_len]
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
+            try:
+                self.lmcache_engine.store(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens,
+                    transfer_spec=request.disagg_spec,
+                )
+                # NOTE(Jiayi): We assume all tokens are saved
+                save_spec.skip_leading_tokens = len(token_ids)
+            except Exception as e:
+                logger.warning(
+                    "Failed to store KV cache for request %s: %s",
+                    request.req_id,
+                    e,
+                )
 
-            self.lmcache_engine.store(
-                token_ids,
-                mask=store_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping,
-                offset=skip_leading_tokens,
-                transfer_spec=request.disagg_spec,
-            )
-
-            # NOTE(Jiayi): We assume all tokens are saved
-            save_spec.skip_leading_tokens = len(token_ids)
 
     def get_finished(
         self, finished_req_ids: set[str]
