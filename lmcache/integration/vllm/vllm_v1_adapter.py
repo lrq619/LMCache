@@ -631,7 +631,6 @@ class LMCacheConnectorV1Impl:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
 
         return
 
@@ -817,18 +816,24 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids[:aligned_token_len]
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
+            try:
+                self.lmcache_engine.store(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens,
+                    transfer_spec=request.disagg_spec,
+                )
+                # NOTE(Jiayi): We assume all tokens are saved
+                save_spec.skip_leading_tokens = len(token_ids)
+            except Exception as e:
+                logger.warning(
+                    "Failed to store KV cache for request %s: %s",
+                    request.req_id,
+                    e,
+                )
 
-            self.lmcache_engine.store(
-                token_ids,
-                mask=store_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping,
-                offset=skip_leading_tokens,
-                transfer_spec=request.disagg_spec,
-            )
-
-            # NOTE(Jiayi): We assume all tokens are saved
-            save_spec.skip_leading_tokens = len(token_ids)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1044,6 +1049,8 @@ class LMCacheConnectorV1Impl:
         # NOTE: Used to stream back the first token
         # for disagg prefill
         if params is not None and "ret_first_tok" in params:
+            if not request._output_token_ids:
+                return 0, return_params
             return_params = {
                 "first_tok": request._output_token_ids[0],
             }

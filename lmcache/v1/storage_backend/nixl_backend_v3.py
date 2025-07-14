@@ -16,6 +16,7 @@
 from concurrent.futures import Future
 from typing import List, Optional
 import threading
+import time
 
 # Third Party
 import torch
@@ -63,6 +64,13 @@ class NixlBackend(StorageBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
+        self.last_count_time = time.time()
+
+        self.last_put_count = 0
+        self.put_count = 0
+
+        self.last_get_count = 0
+        self.get_count = 0
 
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
@@ -79,7 +87,77 @@ class NixlBackend(StorageBackendInterface):
 
         self._nixl_channel = NixlChannel(nixl_config, config, self)
 
+
+
     # TODO(Jiayi): handle `pin` smantics
+    def memcheck(self):
+        self.memory_allocator.memcheck()
+
+    def get_allocated_size(self):
+        return self.memory_allocator.total_allocated_size
+
+    def get_max_lifespan(self):
+        max_lifespan = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                lifespan = time.time() - mem_obj.allocated_ts
+                max_lifespan = max(max_lifespan, lifespan)
+        return max_lifespan
+
+    def get_olddest_req_id(self):
+        olddest_req_id = ""
+        max_lifespan = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                lifespan = time.time() - mem_obj.allocated_ts
+                if max_lifespan < lifespan:
+                    olddest_req_id = mem_obj.req_id
+                max_lifespan = max(max_lifespan, lifespan)
+                
+        return olddest_req_id
+
+    def get_num_mem_objs(self, req_id: str) -> int:
+        num_mem_objs = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                if mem_obj.req_id == req_id:
+                    num_mem_objs += 1
+        return num_mem_objs
+
+    def clear_kv_cache(self, req_id: str):
+        with self._data_lock:
+            keys_to_delete = []
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                if mem_obj.req_id == req_id:
+                    while mem_obj.meta.ref_count > 0:
+                        mem_obj.ref_count_down()
+                    keys_to_delete.append(key)
+
+            for key in keys_to_delete:
+                self._data.pop(key, None)
+
+    def stat(self):
+        now = time.time()
+        duration = now - self.last_count_time
+        new_put = self.put_count - self.last_put_count
+        new_get = self.get_count - self.last_get_count
+        put_speed = new_put / duration
+        get_speed = new_get / duration
+
+        self.last_count_time = now
+        self.last_put_count = self.put_count
+        self.last_get_count = self.get_count
+        return put_speed, get_speed
+
+
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
@@ -107,6 +185,7 @@ class NixlBackend(StorageBackendInterface):
         mem_obj: MemoryObj,
     ):
         with self._data_lock:
+            self.put_count += 1
             self._data[key] = mem_obj
 
     def allocate(
@@ -115,6 +194,7 @@ class NixlBackend(StorageBackendInterface):
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = False,
+        req_id: str = "",
     ) -> MemoryObj:
         """
         Allocate a zero-copy write object for the given shape and dtype.
@@ -125,8 +205,28 @@ class NixlBackend(StorageBackendInterface):
         # NOTE: no eviction in PD
 
         mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
+        if mem_obj:
+            mem_obj.allocated_ts = time.time()
+            mem_obj.req_id = req_id
 
         return mem_obj
+
+    def garbage_collection(
+            self,
+            max_lifespan_sec: float = 2.0
+    ):
+        with self._data_lock:
+            keys_to_delete = []
+            for key, mem_obj in self._data.items():
+                lifespan = time.time() - mem_obj.allocated_ts
+                if lifespan >= max_lifespan_sec:
+                    while mem_obj.meta.ref_count > 0:
+                        mem_obj.ref_count_down()
+                    keys_to_delete.append(key)
+
+            for key in keys_to_delete:
+                self._data.pop(key, None)
+
 
     def batched_submit_put_task(
         self,
@@ -137,11 +237,17 @@ class NixlBackend(StorageBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        self._nixl_channel.prepare_send(
-            keys=keys,
-            mem_objs=memory_objs,
-            transfer_spec=transfer_spec,
-        )
+        try:
+            self._nixl_channel.prepare_send(
+                keys=keys,
+                mem_objs=memory_objs,
+                transfer_spec=transfer_spec,
+            )
+        except Exception as e:
+            for mem_obj in memory_objs:
+                mem_obj.ref_count_down()
+            raise e
+
         return None
 
     def submit_prefetch_task(self, key: CacheEngineKey) -> Optional[Future]:
@@ -166,6 +272,7 @@ class NixlBackend(StorageBackendInterface):
         with self._data_lock:
             # NOTE(Jiayi): we assume that the key must be in local data
             # because we are using a push-based transfer
+            self.get_count += 1
             mem_obj = self._data.pop(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
 

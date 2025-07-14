@@ -212,8 +212,8 @@ class LMCacheEngine:
             memory_objs.append(memory_obj)
 
             tot_kv_size += memory_obj.get_size()
-        # memory_objs might be empty, directly return to avoid sending tokens
-        if not memory_objs:
+
+        if memory_objs == []:
             return
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
         offload_time += time.perf_counter() - t
@@ -461,23 +461,33 @@ class LMCacheEngine:
         )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
+        count = 0
+        req_id = ""
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
+            count += 1
             memory_obj.ref_count_down()
+            req_id = memory_obj.req_id
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
                 self.storage_manager.remove(key)
+                # self.storage_manager.storage_backends['NixlBackend'].memcheck()
             else:
                 self.storage_manager.batched_unpin([key])
+        num_mem_objs = self.storage_manager.storage_backends['NixlBackend'].get_num_mem_objs(req_id)
+        logger.info(f"After removing mem objs for req_id: {req_id}, there are still {num_mem_objs} left")
 
+        total_allocated_size = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
+        max_lifespan = self.storage_manager.storage_backends['NixlBackend'].get_max_lifespan()
+        olddest_req_id = self.storage_manager.storage_backends['NixlBackend'].get_olddest_req_id()
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
+            f"out of total {len(tokens)} tokens, after retrival, total allocated size: {total_allocated_size/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
         )
         return ret_mask
 
@@ -683,6 +693,13 @@ class LMCacheEngine:
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
         return num_removed
+
+    def clear_kv_cache(
+            self,
+            req_id: str,
+    ):
+        assert isinstance(self.storage_manager, StorageManager)
+        self.storage_manager.storage_backends['NixlBackend'].clear_kv_cache(req_id)
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""

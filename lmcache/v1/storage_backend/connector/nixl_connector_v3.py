@@ -59,6 +59,7 @@ class NixlAllocRequest(NixlMsgBase):
     shape: list[int]  # The shape of the memory objects
     dtype: str
     last_chunk_toks: int
+    req_id: str
 
 
 class NixlAllocResponse(NixlMsgBase):
@@ -141,6 +142,7 @@ class NixlSenderTask:
             shape=list(shape),
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
+            req_id=self.req_id
         )
 
     # TODO (Jiayi): reduce for loop
@@ -258,11 +260,21 @@ class NixlSender:
         # send kv
         local_indexes = sender_task.get_local_indexes()
         remote_indexes = alloc_response.remote_indexes
+        if not remote_indexes:
+            sender_task.free_mem_objs()
+            error_req_id = req_id + "::error"
+            notif_msg = NixlProxyNotif(req_id=error_req_id)
+            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+            self._proxy_side_channel.send(notif_msg_bytes)
+
+            raise RuntimeError(
+                f"Failed to allocate memory objects for request ID: {req_id}")
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
 
-        logger.debug(f"transfer spec: {transfer_spec}")
+        logger.info(f"transfer spec: {transfer_spec} for req: {req_id}")
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
+            logger.info(f"Notified kv ready for req: {req_id}")
             notif_msg = NixlProxyNotif(req_id=req_id)
             notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
             self._proxy_side_channel.send(notif_msg_bytes)
@@ -520,6 +532,28 @@ class NixlReceiver:
         self._init_thread.start()
         self._running_threads.append(self._init_thread)
 
+        self._stat_thread = threading.Thread(target=self._stat_loop, daemon=True)
+        self._stat_thread.start()
+        self._running_threads.append(self._stat_thread)
+
+    def _stat_loop(self):
+        while self._running:
+            try:
+                total_allocated_size = self._backend.get_allocated_size()
+                max_lifespan = self._backend.get_max_lifespan()
+                oldest_req_id = self._backend.get_olddest_req_id()
+                put_speed, get_speed = self._backend.stat()
+                logger.info(
+                    f"[Receiver] Total allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
+                    f"max lifespan: {max_lifespan * 1000:.1f}ms, "
+                    f"req_id with max lifespan: {oldest_req_id}, "
+                    f"put_speed: {put_speed:.1f} obj/s, get_speed: {get_speed:.1f} obj/s"
+                )
+            except Exception as e:
+                logger.exception(f"[Receiver] Exception in stat loop: {e}")
+            time.sleep(5)
+
+
     def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
@@ -527,6 +561,10 @@ class NixlReceiver:
         shape = alloc_request.shape
         alloc_indexes = []
 
+        max_lifespan_sec = 2
+        self._backend.garbage_collection(max_lifespan_sec)
+        keys = []
+        mem_objs = []
         for idx, key in enumerate(alloc_request.keys):
             if idx == total_allocs - 1:
                 num_alloc_tokens = alloc_request.last_chunk_toks
@@ -535,22 +573,42 @@ class NixlReceiver:
             else:
                 num_alloc_tokens = self.full_chunk_size
 
-            mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+            mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
 
             # TODO(Jiayi): tune this hyperparameters
             wait_time = 0.01
             decay = 1.1
+            max_retries = 5
+            retry_count = 0
             while mem_obj is None:
+                if retry_count >= max_retries:
+                    break
                 logger.warning(
                     "Failed to allocate memory object, retrying...",
                 )
                 time.sleep(wait_time)
                 wait_time /= decay
                 mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+                retry_count += 1
 
+            if mem_obj is None:
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                logger.warning(
+                    f"Failed to allocate memory object after {max_retries} retries, "
+                    "returning empty response.")
+                return NixlAllocResponse(remote_indexes=[])
+
+            keys.append(key)
+            mem_objs.append(mem_obj)
+
+        for i, key in enumerate(keys):
+            mem_obj = mem_objs[i]
             alloc_indexes.append(mem_obj.meta.address)
 
             self._backend.put(CacheEngineKey.from_string(key), mem_obj)
+        if len(keys) > 0: 
+            logger.info(f"put {len(keys)} mem_objs for req: {mem_objs[0].req_id}")
 
         return NixlAllocResponse(remote_indexes=alloc_indexes)
 
@@ -578,6 +636,7 @@ class NixlReceiver:
                 # first because decode vllm will not be able to see the decode
                 # request until proxy receives the ack.
                 alloc_resp = self._allocate_and_put(alloc_req)
+                
 
                 logger.debug(
                     "Replying allocation response for %s objs",
