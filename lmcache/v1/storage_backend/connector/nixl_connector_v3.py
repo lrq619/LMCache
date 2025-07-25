@@ -157,7 +157,6 @@ class NixlSenderTask:
         for mem_obj in self.mem_objs:
             mem_obj.ref_count_down()
 
-
 class NixlSender:
     """Handles sending data through a NixlPipe."""
 
@@ -205,8 +204,36 @@ class NixlSender:
         proxy_port = nixl_config.proxy_port
         proxy_url = f"{proxy_host}:{proxy_port}"
 
+        # each request id can only send notify/error msg once
+        self.notified_req_set = set()
+        self.notified_req_lock = threading.Lock()
+
         self._proxy_side_channel = self._context.socket(zmq.PUSH)
         self._proxy_side_channel.connect(get_zmq_path(proxy_url, protocol="tcp"))
+
+    def _send_error_msg(self, req_id: str):
+        with self.notified_req_lock:
+            if req_id in self.notified_req_set:
+            # already notified, no need to send anything
+                return
+            else:
+                self.notified_req_set.add(req_id)
+        error_req_id = req_id + "::error"
+        notif_msg = NixlProxyNotif(req_id=error_req_id)
+        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+        self._proxy_side_channel.send(notif_msg_bytes)
+
+    def _send_notify_msg(self, req_id: str):
+        with self.notified_req_lock:
+            if req_id in self.notified_req_set:
+            # already notified, no need to send anything
+                return
+            else:
+                self.notified_req_set.add(req_id)
+        logger.info(f"Notified kv ready for req: {req_id}")
+        notif_msg = NixlProxyNotif(req_id=req_id)
+        notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
+        self._proxy_side_channel.send(notif_msg_bytes)
 
     def prepare_send(
         self,
@@ -261,23 +288,21 @@ class NixlSender:
         local_indexes = sender_task.get_local_indexes()
         remote_indexes = alloc_response.remote_indexes
         if not remote_indexes:
-            sender_task.free_mem_objs()
-            error_req_id = req_id + "::error"
-            notif_msg = NixlProxyNotif(req_id=error_req_id)
-            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-            self._proxy_side_channel.send(notif_msg_bytes)
+            self._send_error_msg(req_id)
 
+            sender_task.free_mem_objs()
             raise RuntimeError(
                 f"Failed to allocate memory objects for request ID: {req_id}")
         self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
-
         logger.info(f"transfer spec: {transfer_spec} for req: {req_id}")
+        # Below logic ensures that: each req_id must send notify/error msg once and only once
         if transfer_spec.is_last_prefill:
-            # Notify the proxy that the transfer is done
-            logger.info(f"Notified kv ready for req: {req_id}")
-            notif_msg = NixlProxyNotif(req_id=req_id)
-            notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
-            self._proxy_side_channel.send(notif_msg_bytes)
+            # If it's last prefill, send notify msg with req_id
+            self._send_notify_msg(req_id)
+        else:
+            # a partial prefill request is finished, we need to set a 2s timer, if is_last_prefill prefill is not done within this 2s, we sent out error msg
+            threading.Timer(2.0, self._send_error_msg, args=[req_id]).start()
+
 
         # free local memory
         sender_task.free_mem_objs()
