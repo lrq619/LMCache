@@ -246,22 +246,25 @@ class RequestTracker:
 
     def update(
         self,
-        cached_request: "CachedRequestData",
+        new_token_ids: list[int],
+        new_block_ids: tuple[list[int], ...],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
 
-        self.token_ids.extend(cached_request.new_token_ids)
+        self.token_ids.extend(new_token_ids)
 
         new_block_ids: list[int]
 
-        if len(cached_request.new_block_ids) == 0:
+        if len(new_block_ids) == 0:
             new_block_ids = []
-        elif not isinstance(cached_request.new_block_ids[0], list):
-            new_block_ids = cached_request.new_block_ids
         else:
-            new_block_ids = cached_request.new_block_ids[0]
+            assert isinstance(new_block_ids[0], list), (
+                "The new_block_ids should be a tuple of lists, "
+                "the vllm version might be too old!"
+            )
+            new_block_ids = new_block_ids[0]
         self.allocated_block_ids.extend(new_block_ids)
 
 
@@ -430,6 +433,7 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(role, is_tp, vllm_config)
+            self._requests_in_step: dict[str, Request] = {}
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config,
@@ -944,6 +948,7 @@ class LMCacheConnectorV1Impl:
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
 
+        self._requests_in_step[request.request_id] = request
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
@@ -1021,9 +1026,23 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        for request in scheduler_output.scheduled_cached_reqs:
-            request_tracker = self._request_trackers[request.req_id]
-            request_tracker.update(request)
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            request_tracker = self._request_trackers[req_id]
+            new_block_ids = cached_reqs.new_block_ids[i]
+            num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if request := self._requests_in_step.get(req_id):
+                num_current_tokens = len(request_tracker.token_ids)
+                new_token_ids = request.all_token_ids[
+                    num_current_tokens : num_current_tokens + num_new_tokens
+                ]
+            else:
+                raise ValueError(
+                    f"Request {req_id} is not in _requests_in_step, "
+                    f"but it is scheduled to be cached"
+                )
+
+            request_tracker.update(new_token_ids, new_block_ids)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
