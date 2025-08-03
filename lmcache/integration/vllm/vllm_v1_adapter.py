@@ -46,6 +46,8 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
 
+import time
+
 if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -763,7 +765,12 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        logger.info(f"[LMCache] Start store for {len(connector_metadata.requests)} requests")
+        total_number = 0
+        start_time = time.perf_counter()
+
         for request in connector_metadata.requests:
+            per_request_start = time.perf_counter()
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
@@ -776,8 +783,10 @@ class LMCacheConnectorV1Impl:
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
+            mapping_start = time.perf_counter()
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
+            mapping_time = time.perf_counter() - mapping_start
             # NOTE: In PD setting, lmcache_engine.lookup() will always return
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
@@ -788,6 +797,7 @@ class LMCacheConnectorV1Impl:
             )
             skip_leading_tokens = save_spec.skip_leading_tokens
 
+            one_mapping_start = time.perf_counter()
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
             # Align to lmcache chunk size
@@ -799,16 +809,21 @@ class LMCacheConnectorV1Impl:
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
-
+            one_mapping_time = time.perf_counter() - one_mapping_start
+            
+            total_number += len(token_ids) - skip_leading_tokens
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s",
+                "(skip_leading_tokens=%d) for request %s, mapping time: %.2f ms, one mapping time: %.2f ms",
                 len(token_ids) - skip_leading_tokens,
                 len(token_ids),
                 skip_leading_tokens,
                 request.req_id,
+                mapping_time * 1000,
+                one_mapping_time * 1000,
             )
 
+            store_start = time.perf_counter()
             is_last_prefill = request.is_last_prefill
             if is_last_prefill:
                 request.disagg_spec.is_last_prefill = True
@@ -837,6 +852,17 @@ class LMCacheConnectorV1Impl:
                     request.req_id,
                     e,
                 )
+            store_time = time.perf_counter() - store_start
+            per_request_end = time.perf_counter()
+            logger.info(
+                "[LMCache] Finished store request %s with %d tokens in %.2f ms, store time: %.2f ms",
+                request.req_id,
+                len(token_ids) - skip_leading_tokens,
+                (per_request_end - per_request_start) * 1000,
+                store_time * 1000,
+            )
+        end_time = time.perf_counter()
+        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_time) * 1000:.2f} ms")
 
 
     def get_finished(

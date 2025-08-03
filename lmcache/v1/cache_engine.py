@@ -187,8 +187,12 @@ class LMCacheEngine:
         put_time = 0.0
         tot_kv_size = 0
         t = time.perf_counter()
-
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        
+        process_tokens = self.token_database.process_tokens(tokens, mask)
+        process_time = time.perf_counter() - t
+        
+        allocate_total_start = time.perf_counter()
+        for start, end, key in process_tokens:
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue
@@ -212,6 +216,7 @@ class LMCacheEngine:
             memory_objs.append(memory_obj)
 
             tot_kv_size += memory_obj.get_size()
+        allocate_total_time = time.perf_counter() - allocate_total_start
 
         if memory_objs == []:
             return
@@ -233,12 +238,14 @@ class LMCacheEngine:
 
         logger.debug(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
+            "offload_time: %.4f ms, put_time: %.4f ms, allocated time: %.4f ms, token_database process time: %.4f ms",
             num_stored_tokens,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,
             offload_time * 1000,
             put_time * 1000,
+            allocate_total_time * 1000,
+            process_time * 1000,
         )
 
         self.stats_monitor.on_store_finished(monitor_req_id)

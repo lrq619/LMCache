@@ -175,6 +175,15 @@ class NixlSender:
         self.nixl_config = nixl_config
 
         self.memory_allocator = backend.memory_allocator
+        
+        logger.info("[NIXL][Sender] memory_allocator instance: %s", type(self.memory_allocator))
+        logger.info("[NIXL][Sender] memory_allocator content: %s", repr(self.memory_allocator))
+        logger.info(
+            "[NIXL][Sender] Initializing NixlAgentWrapper with buffer_ptr=0x%x, buffer_size=%.2f MB, page_size=%d bytes",
+            self.memory_allocator.buffer_ptr,
+            self.memory_allocator.buffer_size / (1024 * 1024),
+            self.memory_allocator.align_bytes,
+        )
 
         self._sender_nixl_wrapper = NixlAgentWrapper(
             buffer_ptr=self.memory_allocator.buffer_ptr,
@@ -358,6 +367,9 @@ class NixlSender:
             remote_indexes,
             # notif_msg_bytes,
         )
+        
+        logger.info(f"[LMCache][NIXL] Using sender xfer_handler: {self._sender_nixl_wrapper.xfer_handler}")
+        logger.info(f"[LMCache][NIXL] Using receiver xfer_handler: {self._remote_xfer_handlers_dict[receiver_id]}")
 
         # NOTE (Jiayi): cannot make this transfer in another thread,
         # giving error: `UCX  ERROR cuCtxGetDevice(&key.cu_device)
