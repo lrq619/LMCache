@@ -18,6 +18,7 @@ import abc
 
 # Third Party
 import torch
+import nvtx
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -329,12 +330,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
         self.kv_cache_pointers = torch.empty(
-            num_layers, dtype=torch.int64, device="cpu"
+            num_layers, dtype=torch.int64, device="cpu", pin_memory=True
         )
         # Not sure we need a dict here. Maybe a single GPU connector always
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
+        self.kv_cache_pointers_cuda_mem = torch.empty(num_layers, dtype=torch.int64, device=kwargs["device"])
+        self.copy_stream = torch.cuda.Stream(device=kwargs["device"])
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
@@ -352,15 +355,17 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        with nvtx.annotate("pointers copy", color="red"):
+            self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         device = kv_caches[0].device
         assert device.type == "cuda", "The device should be CUDA."
         idx = device.index
-        if idx not in self.kv_cache_pointers_on_gpu:
-            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
-            )
-        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+        with nvtx.annotate("alloc", color="red"):
+            if idx not in self.kv_cache_pointers_on_gpu:
+                self.kv_cache_pointers_on_gpu[idx] = self.kv_cache_pointers_cuda_mem
+        with nvtx.annotate("copy", color="red"):
+            with torch.cuda.stream(self.copy_stream):
+                self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
             assert kv_caches[0].dim() == 3
@@ -456,32 +461,34 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(kvcaches)
+        with nvtx.annotate("kv_cache pointer init", color="blue"):
+            kv_cache_pointers = self._initialize_pointers(kvcaches)
 
-        if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            lmc_ops.multi_layer_kv_transfer(
-                memory_obj.tensor,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                kvcaches[0].device,
-                self.page_buffer_size,
-                True,
-                self.use_mla,
-            )
-        else:
-            # kvcaches -> gpu_buffer -> memobj
-            assert self.gpu_buffer.device == kvcaches[0].device
-            tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            lmc_ops.multi_layer_kv_transfer(
-                tmp_gpu_buffer,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                kvcaches[0].device,
-                self.page_buffer_size,
-                True,
-                self.use_mla,
-            )
-            memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+        with nvtx.annotate("from gpu kernel", color="blue"):
+            if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+                lmc_ops.multi_layer_kv_transfer(
+                    memory_obj.tensor,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    kvcaches[0].device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                )
+            else:
+                # kvcaches -> gpu_buffer -> memobj
+                assert self.gpu_buffer.device == kvcaches[0].device
+                tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                lmc_ops.multi_layer_kv_transfer(
+                    tmp_gpu_buffer,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    kvcaches[0].device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                )
+                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
