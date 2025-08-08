@@ -60,6 +60,7 @@ class NixlAllocRequest(NixlMsgBase):
     dtype: str
     last_chunk_toks: int
     req_id: str
+    delete: bool = False
 
 
 class NixlAllocResponse(NixlMsgBase):
@@ -328,7 +329,9 @@ class NixlSender:
         )
 
         side_channel = self._mem_alloc_sockets[receiver_id]
-
+        
+        logger.debug("ZMQ REQ socket connected to: %s", side_channel.getsockopt_string(zmq.LAST_ENDPOINT))
+        
         side_channel.send(msgspec.msgpack.encode(alloc_request))
         msg = side_channel.recv()
         alloc_response = msgspec.msgpack.decode(msg, type=NixlMsg)
@@ -598,8 +601,8 @@ class NixlReceiver:
         shape = alloc_request.shape
         alloc_indexes = []
 
-        max_lifespan_sec = 2
-        self._backend.garbage_collection(max_lifespan_sec)
+        # max_lifespan_sec = 2
+        # self._backend.garbage_collection(max_lifespan_sec)
         keys = []
         mem_objs = []
         for idx, key in enumerate(alloc_request.keys):
@@ -668,6 +671,17 @@ class NixlReceiver:
                     "Received allocation request for %s objs",
                     len(alloc_req.keys),
                 )
+                
+                if alloc_req.delete:
+                    deleted = self._backend.delete_by_req_id(alloc_req.req_id)
+                    self._alloc_side_channel.send(msgspec.msgpack.encode(
+                        NixlAllocResponse(remote_indexes=[])))
+                    logger.debug(
+                        "Received delete request for %s, deleted: %s",
+                        alloc_req.req_id,
+                        deleted,
+                    )   
+                    continue
 
                 # NOTE: it's okay to put the memory objs into the storage backend
                 # first because decode vllm will not be able to see the decode
