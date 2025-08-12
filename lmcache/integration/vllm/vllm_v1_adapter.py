@@ -47,6 +47,9 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
 )
 
 import time
+import nvtx
+
+from torch.profiler import profile, ProfilerActivity
 
 if TYPE_CHECKING:
     # Third Party
@@ -770,37 +773,45 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        start_time = time.perf_counter()
         logger.info(f"[LMCache] Start store for {len(connector_metadata.requests)} requests")
         total_number = 0
-        start_time = time.perf_counter()
         
         mapping_start = time.perf_counter()
         copy_events: list[torch.cuda.Event] = []
         acquired_buffers: list[tuple[int, torch.Tensor]] = []
         gpu_views: list[torch.Tensor] = []
         req_indices: list[int] = []
-        for i, request in enumerate(connector_metadata.requests):
-            length = len(request.token_ids)
-            if length == 0:
-                continue
-
-            bucket, buf = self._slotmap_pool.acquire(length)
-            acquired_buffers.append((bucket, buf))
-            
-            gpu_view = buf[:length]
-            gpu_views.append(gpu_view)
-            req_indices.append(i)
-            
-            evt = self._slotmap_pool.async_copy_from_cpu(request.slot_mapping, gpu_view)
-            copy_events.append(evt)
-
-        for evt in copy_events:
-            self._slotmap_pool.wait_on(evt)
-        for idx, view in zip(req_indices, gpu_views):
-            connector_metadata.requests[idx].slot_mapping = view
         
-        mapping_time = time.perf_counter() - mapping_start
+        with nvtx.annotate("LMCache wait_for_save: slotmap copy", color="blue"):
+            for i, request in enumerate(connector_metadata.requests):
+                length = len(request.token_ids)
+                if length == 0:
+                    continue
 
+                bucket, buf = self._slotmap_pool.acquire(length)
+                acquired_buffers.append((bucket, buf))
+                
+                gpu_view = buf[:length]
+                gpu_views.append(gpu_view)
+                req_indices.append(i)
+                
+                logger.info(
+                    f"[LMCache] request[{i}] slot_mapping device: {request.slot_mapping.device}, dtype: {request.slot_mapping.dtype}"
+                )
+                evt = self._slotmap_pool.async_copy_from_cpu(request.slot_mapping, gpu_view)
+                copy_events.append(evt)
+            for evt in copy_events:
+                self._slotmap_pool.wait_on(evt)
+            for idx, view in zip(req_indices, gpu_views):
+                connector_metadata.requests[idx].slot_mapping = view
+                logger.info(
+                    f"[LMCache] request[{i}] slot_mapping device: {connector_metadata.requests[idx].slot_mapping.device}, dtype: {connector_metadata.requests[idx].slot_mapping.dtype}"
+                )
+        
+        mapping_time = time.perf_counter() - mapping_start       
+
+        process_start = time.perf_counter()
         for request in connector_metadata.requests:
             per_request_start = time.perf_counter()
             save_spec = request.save_spec
@@ -845,12 +856,11 @@ class LMCacheConnectorV1Impl:
             total_number += len(token_ids) - skip_leading_tokens
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s, mapping time: %.2f ms, one mapping time: %.2f ms",
+                "(skip_leading_tokens=%d) for request %s, one mapping time: %.2f ms",
                 len(token_ids) - skip_leading_tokens,
                 len(token_ids),
                 skip_leading_tokens,
                 request.req_id,
-                mapping_time * 1000,
                 one_mapping_time * 1000,
             )
 
@@ -886,19 +896,19 @@ class LMCacheConnectorV1Impl:
             store_time = time.perf_counter() - store_start
             per_request_end = time.perf_counter()
             logger.info(
-                "[LMCache] Finished store request %s with %d tokens in %.2f ms, store time: %.2f ms",
+                "[LMCache] Finished put request %s with %d tokens in %.2f ms, store time: %.2f ms",
                 request.req_id,
                 len(token_ids) - skip_leading_tokens,
                 (per_request_end - per_request_start) * 1000,
                 store_time * 1000,
             )
+        process_time = time.perf_counter() - process_start
+        
+        end_time = time.perf_counter()
+        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_time) * 1000:.2f} ms, process time: {(process_time) * 1000:.2f} ms, mapping time: {(mapping_time) * 1000:.2f} ms")
         
         for bucket, buf in acquired_buffers:
             self._slotmap_pool.release(bucket, buf)
-        
-        end_time = time.perf_counter()
-        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_time) * 1000:.2f} ms")
-
 
     def get_finished(
         self, finished_req_ids: set[str]

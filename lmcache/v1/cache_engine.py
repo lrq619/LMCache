@@ -220,8 +220,9 @@ class LMCacheEngine:
 
         if memory_objs == []:
             return
+        batch_from_gpu_start = time.perf_counter()
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-        offload_time += time.perf_counter() - t
+        offload_time += time.perf_counter() - batch_from_gpu_start
 
         t = time.perf_counter()
 
@@ -418,6 +419,7 @@ class LMCacheEngine:
                     # TODO(Jiayi): Need to refactor P2P as a storage backend to
                     # clean up the following code.
                     if self.enable_p2p:
+                        logger.debug(f"enabling p2p lookup")
                         future_memory_obj = asyncio.run_coroutine_threadsafe(
                             self.distributed_server.issue_get(key),
                             self.distributed_loop,
@@ -434,7 +436,7 @@ class LMCacheEngine:
                 # storage backend support pin operation, and the memory
                 # object is already pinned in the storage backend.
                 ret_mask[start:end] = True
-
+                logger.debug(f"location is {location} for key {key}")
                 if location not in key_mapping:
                     key_mapping[location] = [key]
                     start_mapping[location] = [start]
@@ -458,6 +460,7 @@ class LMCacheEngine:
             reordered_keys.extend(keys)
             reordered_starts.extend(start_mapping[location])
             reordered_ends.extend(end_mapping[location])
+        logger.info(f"Retrieving {len(reordered_keys)} keys from storage backends: {list(key_mapping.keys())}")
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
@@ -479,6 +482,9 @@ class LMCacheEngine:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
+                logger.debug(
+                    f"Removing memory object {len(reordered_keys)} with req_id {req_id} for key {key}"
+                )
                 self.storage_manager.remove(key)
                 # self.storage_manager.storage_backends['NixlBackend'].memcheck()
             else:
@@ -492,7 +498,7 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            f"Retrieved {retrieved_tokens} "
+            f"For req_id: {req_id}, Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens, after retrival, total allocated size: {total_allocated_size/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
         )

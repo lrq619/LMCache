@@ -613,31 +613,42 @@ class NixlReceiver:
             else:
                 num_alloc_tokens = self.full_chunk_size
 
-            mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
+            mem_obj = None
+            wait_time = 0.2
+            decay = 1.5
+
+            while mem_obj is None:
+                mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
+                if mem_obj is None:
+                    logger.warning("Failed to allocate memory object, retrying...")
+                    time.sleep(wait_time)
+                    wait_time *= decay
+
+            # mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
 
             # TODO(Jiayi): tune this hyperparameters
-            wait_time = 0.01
-            decay = 1.1
-            max_retries = 5
-            retry_count = 0
-            while mem_obj is None:
-                if retry_count >= max_retries:
-                    break
-                logger.warning(
-                    "Failed to allocate memory object, retrying...",
-                )
-                time.sleep(wait_time)
-                wait_time /= decay
-                mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
-                retry_count += 1
+            # wait_time = 1
+            # decay = 1.1
+            # max_retries = 5
+            # retry_count = 0
+            # while mem_obj is None:
+            #     if retry_count >= max_retries:
+            #         break
+            #     logger.warning(
+            #         "Failed to allocate memory object, retrying...",
+            #     )
+            #     time.sleep(wait_time)
+            #     wait_time /= decay
+            #     mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
+            #     retry_count += 1
 
-            if mem_obj is None:
-                for mem_obj in mem_objs:
-                    mem_obj.ref_count_down()
-                logger.warning(
-                    f"Failed to allocate memory object after {max_retries} retries, "
-                    "returning empty response.")
-                return NixlAllocResponse(remote_indexes=[])
+            # if mem_obj is None:
+            #     for mem_obj in mem_objs:
+            #         mem_obj.ref_count_down()
+            #     logger.warning(
+            #         f"Failed to allocate memory object after {max_retries} retries, "
+            #         "returning empty response.")
+            #     return NixlAllocResponse(remote_indexes=[])
 
             keys.append(key)
             mem_objs.append(mem_obj)
