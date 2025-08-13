@@ -210,6 +210,21 @@ class NixlBackend(StorageBackendInterface):
             mem_obj.req_id = req_id
 
         return mem_obj
+    
+    def allocate_cpu(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = False,
+        req_id: str = "",
+    ) -> MemoryObj:
+        mem_obj = self.memory_allocator.allocate_cpu(shape=shape, dtype=dtype, fmt=fmt)
+        if mem_obj:
+            mem_obj.allocated_ts = time.time()
+            mem_obj.req_id = req_id
+
+        return mem_obj
 
     def garbage_collection(
             self,

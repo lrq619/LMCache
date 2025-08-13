@@ -421,15 +421,36 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
 
-        lmc_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            kvcaches[0].device,
-            self.page_buffer_size,
-            False,
-            self.use_mla,
-        )
+        if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+            lmc_ops.multi_layer_kv_transfer(
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                kvcaches[0].device,
+                self.page_buffer_size,
+                False,
+                self.use_mla,
+            )
+        else:
+            # kvcaches -> gpu_buffer -> memobj
+            assert self.gpu_buffer.device == kvcaches[0].device
+            tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+            lmc_ops.multi_layer_kv_transfer(
+                tmp_gpu_buffer,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                kvcaches[0].device,
+                self.page_buffer_size,
+                False,
+                self.use_mla,
+            )
+            memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+            
+        if not memory_obj.tensor.is_cuda:
+            torch.cuda.synchronize()
+            
+        if self.use_mla:
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):

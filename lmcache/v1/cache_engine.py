@@ -52,6 +52,7 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+import socket
 
 logger = init_logger(__name__)
 
@@ -758,12 +759,31 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                return PagedTensorMemoryAllocator(
+                allocator = PagedTensorMemoryAllocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
                     MemoryFormat.KV_T2D,  # TODO: remove this hardcode
                 )
+                try:
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=True,
+                    )
+                except RuntimeError as e:
+                    logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=False,
+                    )
+                allocator.init_cpu_buffer(cpu_buffer)
+                
+                return allocator
+                
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:

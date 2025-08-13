@@ -892,6 +892,7 @@ class LMCacheConnectorV1Impl:
                     "Failed to store KV cache for request %s: %s",
                     request.req_id,
                     e,
+                    exc_info=True, 
                 )
             store_time = time.perf_counter() - store_start
             per_request_end = time.perf_counter()

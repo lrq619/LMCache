@@ -41,6 +41,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
+import socket
 
 logger = init_logger(__name__)
 
@@ -60,6 +61,7 @@ class NixlAllocRequest(NixlMsgBase):
     dtype: str
     last_chunk_toks: int
     req_id: str
+    is_cuda: bool = True  # Whether the memory objects are on CUDA
     delete: bool = False
 
 
@@ -71,14 +73,16 @@ class NixlAllocResponse(NixlMsgBase):
 
 class NixlInitRequest(NixlMsgBase):
     sender_meta_bytes: bytes  # Metadata from the sender nixl agent
+    sender_cpu_meta_bytes: bytes
 
 
 class NixlMemRegRequest(NixlMsgBase):
-    pass
+    is_cuda: bool = True  # Whether the memory objects are on CUDA
 
 
 class NixlInitResponse(NixlMsgBase):
     receiver_meta_bytes: bytes  # Metadata from the receiver nixl agent
+    receiver_cpu_meta_bytes: bytes
 
 
 class NixlMemRegResponse(NixlMsgBase):
@@ -190,8 +194,16 @@ class NixlSender:
             buffer_ptr=self.memory_allocator.buffer_ptr,
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
+            mem_type="cuda"
+        )
+        self._sender_cpu_nixl_wrapper = NixlAgentWrapper(
+            buffer_ptr=self.memory_allocator.cpu_buffer_ptr,
+            buffer_size=self.memory_allocator.cpu_buffer_size,
+            page_size=self.memory_allocator.align_bytes,
+            mem_type="DRAM"
         )
         self._nixl_agent = self._sender_nixl_wrapper.agent
+        self._nixl_cpu_agent = self._sender_cpu_nixl_wrapper.agent
 
         # Initialize the ZeroMQ context
         self._context = zmq.Context()
@@ -201,6 +213,7 @@ class NixlSender:
         self.req_queue = Queue()
 
         self._remote_xfer_handlers_dict = {}
+        self._remote_xfer_handlers_is_cuda_dict = {}
 
         # Start the seder thread
         self._running = True
@@ -291,6 +304,7 @@ class NixlSender:
 
         # use remote alloc
         alloc_request = sender_task.get_alloc_request()
+        alloc_request.is_cuda = self._remote_xfer_handlers_is_cuda_dict.get(receiver_id, True)
 
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
 
@@ -362,29 +376,25 @@ class NixlSender:
             req_id,
         )
 
-        handle = self._nixl_agent.make_prepped_xfer(
+        is_cuda = self._remote_xfer_handlers_is_cuda_dict.get(receiver_id, True)
+        agent = self._nixl_agent if is_cuda else self._nixl_cpu_agent
+        agent_wrapper = self._sender_nixl_wrapper if is_cuda else self._sender_cpu_nixl_wrapper
+        handle = agent.make_prepped_xfer(
             "WRITE",
-            self._sender_nixl_wrapper.xfer_handler,
+            agent_wrapper.xfer_handler,
             local_indexes,
             self._remote_xfer_handlers_dict[receiver_id],
             remote_indexes,
             # notif_msg_bytes,
         )
-        
-        logger.info(f"[LMCache][NIXL] Using sender xfer_handler: {self._sender_nixl_wrapper.xfer_handler}")
-        logger.info(f"[LMCache][NIXL] Using receiver xfer_handler: {self._remote_xfer_handlers_dict[receiver_id]}")
-
-        # NOTE (Jiayi): cannot make this transfer in another thread,
-        # giving error: `UCX  ERROR cuCtxGetDevice(&key.cu_device)
-        # failed: invalid device context`
-        self._nixl_agent.transfer(handle)
+        agent.transfer(handle)
 
         # TODO (Jiayi): offload the following to another thread
         # TODO (Jiayi) tune hyperparameters
         wait_time = 0.0007
         decay = 1.1
         while True:
-            status = self._nixl_agent.check_xfer_state(handle)
+            status = agent.check_xfer_state(handle)
             logger.debug(f"Transfer status: {status}")
 
             if status == "ERR":
@@ -398,10 +408,16 @@ class NixlSender:
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
 
+    def _is_same_node(self, receiver_host: str) -> bool:
+        host_name = socket.gethostname()
+        logger.debug(f"host_name is {host_name}")
+        return receiver_host == host_name
+
     def _initialize_nixl_sender_connection(
         self,
         receiver_id: str,
-        receiver_init_url: NixlReceiverInfo,
+        receiver_host: str,
+        receiver_init_url: str,
     ) -> None:
         """
         Initialize the NIXL sender connection with the receiver.
@@ -413,6 +429,7 @@ class NixlSender:
 
         nixl_init_req = NixlInitRequest(
             sender_meta_bytes=self._nixl_agent.get_agent_metadata(),
+            sender_cpu_meta_bytes=self._nixl_cpu_agent.get_agent_metadata(),
         )
 
         init_tmp_socket.send(msgspec.msgpack.encode(nixl_init_req))
@@ -422,21 +439,34 @@ class NixlSender:
         nixl_init_resp = msgspec.msgpack.decode(nixl_init_resp_bytes, type=NixlMsg)
 
         remote_meta_bytes = nixl_init_resp.receiver_meta_bytes
+        remote_cpu_meta_bytes = nixl_init_resp.receiver_cpu_meta_bytes
+        
         remote_agent_name = self._nixl_agent.add_remote_agent(remote_meta_bytes)
+        remote_cpu_agent_name = self._nixl_cpu_agent.add_remote_agent(remote_cpu_meta_bytes)
 
         # Register memory
-        nixl_mem_reg_req = NixlMemRegRequest()
+        is_same_node = self._is_same_node(receiver_host)
+        logger.debug(f"is same node {is_same_node}")
+        nixl_mem_reg_req = NixlMemRegRequest(is_cuda=is_same_node)
         init_tmp_socket.send(msgspec.msgpack.encode(nixl_mem_reg_req))
         nixl_mem_reg_resp_bytes = init_tmp_socket.recv()
         nixl_mem_reg_resp = msgspec.msgpack.decode(
             nixl_mem_reg_resp_bytes, type=NixlMsg
         )
+        
         remote_xfer_dlist_bytes = nixl_mem_reg_resp.receiver_xfer_dlist_bytes
-        remote_xfer_dlist = self._nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
-        remote_xfer_handlers = self._nixl_agent.prep_xfer_dlist(
-            remote_agent_name, remote_xfer_dlist
-        )
+        if is_same_node:
+            remote_xfer_dlist = self._nixl_agent.deserialize_descs(remote_xfer_dlist_bytes)
+            remote_xfer_handlers = self._nixl_agent.prep_xfer_dlist(
+                remote_agent_name, remote_xfer_dlist
+            )
+        else:
+            remote_xfer_dlist = self._nixl_cpu_agent.deserialize_descs(remote_xfer_dlist_bytes)
+            remote_xfer_handlers = self._nixl_cpu_agent.prep_xfer_dlist(
+                remote_cpu_agent_name, remote_xfer_dlist
+            )
         self._remote_xfer_handlers_dict[receiver_id] = remote_xfer_handlers
+        self._remote_xfer_handlers_is_cuda_dict[receiver_id] = is_same_node
 
         init_tmp_socket.close()
 
@@ -480,7 +510,7 @@ class NixlSender:
         receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
 
         # Initialize the nixl sender connection
-        self._initialize_nixl_sender_connection(receiver_id, receiver_init_url)
+        self._initialize_nixl_sender_connection(receiver_id, receiver_host, receiver_init_url)
 
         # Initialize the memory allocation side channel
         self._initialize_mem_alloc_side_channel(receiver_id, receiver_mem_alloc_url)
@@ -525,8 +555,14 @@ class NixlReceiver:
             buffer_size=self.memory_allocator.buffer_size,
             page_size=self.memory_allocator.align_bytes,
         )
+        self._receiver_cpu_nixl_wrapper = NixlAgentWrapper(
+            buffer_ptr=self.memory_allocator.cpu_buffer_ptr,
+            buffer_size=self.memory_allocator.cpu_buffer_size,
+            page_size=self.memory_allocator.align_bytes,
+        )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
+        self._nixl_cpu_agent = self._receiver_cpu_nixl_wrapper.agent
 
         self.nixl_config = nixl_config
 
@@ -617,12 +653,20 @@ class NixlReceiver:
             wait_time = 0.2
             decay = 1.5
 
-            while mem_obj is None:
-                mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
-                if mem_obj is None:
-                    logger.warning("Failed to allocate memory object, retrying...")
-                    time.sleep(wait_time)
-                    wait_time *= decay
+            if alloc_request.is_cuda:
+                while mem_obj is None:
+                    mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
+                    if mem_obj is None:
+                        logger.warning("Failed to allocate memory object, retrying...")
+                        time.sleep(wait_time)
+                        wait_time *= decay
+            else:
+                while mem_obj is None:
+                    mem_obj = self._backend.allocate_cpu(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
+                    if mem_obj is None:
+                        logger.warning("Failed to allocate cpu memory object, retrying...")
+                        time.sleep(wait_time)
+                        wait_time *= decay
 
             # mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
 
@@ -722,6 +766,7 @@ class NixlReceiver:
 
     def _init_loop(self):
         local_meta = self._nixl_agent.get_agent_metadata()
+        local_cpu_meta = self._nixl_cpu_agent.get_agent_metadata()
 
         # NOTE: Initialization has to be two stages:
         # (1) Exchanging the metadata.
@@ -738,17 +783,27 @@ class NixlReceiver:
 
                 if isinstance(req, NixlInitRequest):
                     self._nixl_agent.add_remote_agent(req.sender_meta_bytes)
+                    self._nixl_cpu_agent.add_remote_agent(req.sender_cpu_meta_bytes)
 
                     resp = NixlInitResponse(
                         receiver_meta_bytes=local_meta,
+                        receiver_cpu_meta_bytes=local_cpu_meta,
                     )
 
                     logger.debug("Replying initialization response")
 
                 elif isinstance(req, NixlMemRegRequest):
-                    local_xfer_descs = self._nixl_agent.get_serialized_descs(
-                        self._receiver_nixl_wrapper.xfer_descs
-                    )
+                    is_cuda = req.is_cuda
+                    if is_cuda:
+                        # Register the memory descriptors for CUDA
+                        local_xfer_descs = self._nixl_agent.get_serialized_descs(
+                            self._receiver_nixl_wrapper.xfer_descs
+                        )
+                    else:
+                        # Register the memory descriptors for CPU
+                        local_xfer_descs = self._nixl_cpu_agent.get_serialized_descs(
+                            self._receiver_cpu_nixl_wrapper.xfer_descs
+                        )
 
                     resp = NixlMemRegResponse(
                         receiver_xfer_dlist_bytes=local_xfer_descs,
@@ -866,6 +921,8 @@ class NixlAgentWrapper:
         buffer_ptr: int,
         buffer_size: int,
         page_size: int,
+        *,
+        mem_type: str = "cuda",
     ):
         """
         Initialize the NIXL agent.
@@ -891,7 +948,7 @@ class NixlAgentWrapper:
         # Register the memory
         memory_desc = [(buffer_ptr, buffer_size, 0, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
-        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
+        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)
 
         # Create xfer handlers
@@ -899,8 +956,8 @@ class NixlAgentWrapper:
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
             xfer_desc.append((base_addr, page_size, 0))
 
-        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type=mem_type)
 
         self.agent = nixl_agent
         self.reg_descs = reg_descs
