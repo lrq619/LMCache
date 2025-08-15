@@ -187,6 +187,21 @@ class NixlBackend(StorageBackendInterface):
         with self._data_lock:
             self.put_count += 1
             self._data[key] = mem_obj
+            
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_T2D,
+        eviction: bool = False,
+    ) -> Optional[List[MemoryObj]]:
+         # NOTE: no eviction in PD
+        
+        memory_objs = self.memory_allocator.batched_allocate(
+            shape, dtype, batch_size, fmt
+        )
+        return memory_objs
 
     def allocate(
         self,

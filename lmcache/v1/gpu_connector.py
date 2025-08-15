@@ -421,7 +421,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
 
-        if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+        if memory_obj.tensor.is_cuda:
             lmc_ops.multi_layer_kv_transfer(
                 memory_obj.tensor,
                 kv_cache_pointers,
@@ -432,20 +432,20 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 self.use_mla,
             )
         else:
-            # kvcaches -> gpu_buffer -> memobj
             assert self.gpu_buffer.device == kvcaches[0].device
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            lmc_ops.multi_layer_kv_transfer(
-                tmp_gpu_buffer,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                kvcaches[0].device,
-                self.page_buffer_size,
-                False,
-                self.use_mla,
-            )
-            memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
-            
+            with torch.cuda.stream(self.copy_stream):
+                tmp_gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
+                lmc_ops.multi_layer_kv_transfer(
+                    tmp_gpu_buffer,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    kvcaches[0].device,
+                    self.page_buffer_size,
+                    False,
+                    self.use_mla,
+                )
+        
         if not memory_obj.tensor.is_cuda:
             torch.cuda.synchronize()
             
@@ -486,7 +486,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         with nvtx.annotate("from gpu kernel", color="blue"):
-            if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+            # if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+            if memory_obj.tensor.is_cuda:
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
                     kv_cache_pointers,
@@ -1088,6 +1089,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         sync: bool = kwargs["sync"]
 
         self._lazy_initialize_buffer(kvcaches)
+        assert self.gpu_buffer_allocator is not None, (
+            "Failed to init GPU buffer allocator"
+        )
 
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):

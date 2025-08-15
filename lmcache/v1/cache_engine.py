@@ -147,6 +147,10 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+    def _is_same_node(self, receiver_host: str) -> bool:
+        host_name = socket.gethostname()
+        return receiver_host == host_name
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
@@ -203,7 +207,13 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            transfer_spec = None
+            if "transfer_spec" in kwargs:
+                transfer_spec = kwargs["transfer_spec"]
+            if self._is_same_node(transfer_spec.receiver_info.receiver_host):
+                memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            else:
+                memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory for the KV cache.\n"
@@ -227,9 +237,6 @@ class LMCacheEngine:
 
         t = time.perf_counter()
 
-        transfer_spec = None
-        if "transfer_spec" in kwargs:
-            transfer_spec = kwargs["transfer_spec"]
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 

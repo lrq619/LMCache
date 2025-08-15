@@ -1084,7 +1084,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
-        return free_block
+        return allocated_blocks
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj):
