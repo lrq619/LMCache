@@ -116,6 +116,22 @@ class StorageManager:
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
         return self.allocator_backend.allocate(shape, dtype, fmt, eviction=eviction)
+    
+    @_lmcache_nvtx_annotate
+    def allocate_cpu(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction=True,
+    ) -> Optional[MemoryObj]:
+        """
+        Allocate memory object with memory allocator.
+        Use LRU evictor if eviction is enabled.
+        """
+        # TODO (Jiayi): We might need to pre-allocate and management
+        # disk in a similar way as CPU.
+        return self.allocator_backend.allocate_cpu(shape, dtype, fmt, eviction=eviction)
 
     @_lmcache_nvtx_annotate
     def batched_allocate(

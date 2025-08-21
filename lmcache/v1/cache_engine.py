@@ -52,6 +52,7 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+import socket
 
 logger = init_logger(__name__)
 
@@ -146,6 +147,10 @@ class LMCacheEngine:
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
+    def _is_same_node(self, receiver_host: str) -> bool:
+        host_name = socket.gethostname()
+        return receiver_host == host_name
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
@@ -187,8 +192,12 @@ class LMCacheEngine:
         put_time = 0.0
         tot_kv_size = 0
         t = time.perf_counter()
-
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        
+        process_tokens = self.token_database.process_tokens(tokens, mask)
+        process_time = time.perf_counter() - t
+        
+        allocate_total_start = time.perf_counter()
+        for start, end, key in process_tokens:
             assert isinstance(key, CacheEngineKey)
             if self.storage_manager.contains(key):
                 continue
@@ -198,7 +207,13 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            transfer_spec = None
+            if "transfer_spec" in kwargs:
+                transfer_spec = kwargs["transfer_spec"]
+            if self._is_same_node(transfer_spec.receiver_info.receiver_host):
+                memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            else:
+                memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory for the KV cache.\n"
@@ -212,17 +227,16 @@ class LMCacheEngine:
             memory_objs.append(memory_obj)
 
             tot_kv_size += memory_obj.get_size()
+        allocate_total_time = time.perf_counter() - allocate_total_start
 
         if memory_objs == []:
             return
+        batch_from_gpu_start = time.perf_counter()
         self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-        offload_time += time.perf_counter() - t
+        offload_time += time.perf_counter() - batch_from_gpu_start
 
         t = time.perf_counter()
 
-        transfer_spec = None
-        if "transfer_spec" in kwargs:
-            transfer_spec = kwargs["transfer_spec"]
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -233,12 +247,14 @@ class LMCacheEngine:
 
         logger.debug(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
+            "offload_time: %.4f ms, put_time: %.4f ms, allocated time: %.4f ms, token_database process time: %.4f ms",
             num_stored_tokens,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,
             offload_time * 1000,
             put_time * 1000,
+            allocate_total_time * 1000,
+            process_time * 1000,
         )
 
         self.stats_monitor.on_store_finished(monitor_req_id)
@@ -411,6 +427,7 @@ class LMCacheEngine:
                     # TODO(Jiayi): Need to refactor P2P as a storage backend to
                     # clean up the following code.
                     if self.enable_p2p:
+                        logger.debug(f"enabling p2p lookup")
                         future_memory_obj = asyncio.run_coroutine_threadsafe(
                             self.distributed_server.issue_get(key),
                             self.distributed_loop,
@@ -427,7 +444,7 @@ class LMCacheEngine:
                 # storage backend support pin operation, and the memory
                 # object is already pinned in the storage backend.
                 ret_mask[start:end] = True
-
+                logger.debug(f"location is {location} for key {key}")
                 if location not in key_mapping:
                     key_mapping[location] = [key]
                     start_mapping[location] = [start]
@@ -451,6 +468,7 @@ class LMCacheEngine:
             reordered_keys.extend(keys)
             reordered_starts.extend(start_mapping[location])
             reordered_ends.extend(end_mapping[location])
+        logger.info(f"Retrieving {len(reordered_keys)} keys from storage backends: {list(key_mapping.keys())}")
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
@@ -462,22 +480,19 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         count = 0
-        req_id = ""
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
             count += 1
             memory_obj.ref_count_down()
-            req_id = memory_obj.req_id
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
-                self.storage_manager.remove(key)
+                if memory_obj.meta.ref_count == 0:
+                    self.storage_manager.remove(key)
                 # self.storage_manager.storage_backends['NixlBackend'].memcheck()
             else:
                 self.storage_manager.batched_unpin([key])
-        num_mem_objs = self.storage_manager.storage_backends['NixlBackend'].get_num_mem_objs(req_id)
-        logger.info(f"After removing mem objs for req_id: {req_id}, there are still {num_mem_objs} left")
 
         total_allocated_size = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
         max_lifespan = self.storage_manager.storage_backends['NixlBackend'].get_max_lifespan()
@@ -745,12 +760,31 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                return PagedTensorMemoryAllocator(
+                allocator = PagedTensorMemoryAllocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
                     metadata.kv_dtype,
                     MemoryFormat.KV_T2D,  # TODO: remove this hardcode
                 )
+                try:
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=True,
+                    )
+                except RuntimeError as e:
+                    logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=False,
+                    )
+                allocator.init_cpu_buffer(cpu_buffer)
+                
+                return allocator
+                
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if config.weka_path is not None or config.gds_path is not None:

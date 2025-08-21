@@ -100,10 +100,11 @@ class RetrieveStatus(Enum):
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_nixl:
-        return False
-    else:
-        return True
+    # if lmcache_config.enable_nixl:
+    #     return False
+    # else:
+    #     return True
+    return True
 
 
 def init_lmcache_engine(

@@ -46,6 +46,11 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
 
+import time
+import nvtx
+
+from torch.profiler import profile, ProfilerActivity
+
 if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -425,6 +430,11 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        self._slotmap_max_tokens = 16 * 1024
+        self._slotmap_pool = GPUSlotMappingPool(
+            max_bucket=self._slotmap_max_tokens,
+        )
+        
         self._parent = parent
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
@@ -763,7 +773,47 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        start_time = time.perf_counter()
+        logger.info(f"[LMCache] Start store for {len(connector_metadata.requests)} requests")
+        total_number = 0
+        
+        mapping_start = time.perf_counter()
+        copy_events: list[torch.cuda.Event] = []
+        acquired_buffers: list[tuple[int, torch.Tensor]] = []
+        gpu_views: list[torch.Tensor] = []
+        req_indices: list[int] = []
+        
+        # with nvtx.annotate("LMCache wait_for_save: slotmap copy", color="blue"):
+        #     for i, request in enumerate(connector_metadata.requests):
+        #         length = len(request.token_ids)
+        #         if length == 0:
+        #             continue
+
+        #         bucket, buf = self._slotmap_pool.acquire(length)
+        #         acquired_buffers.append((bucket, buf))
+                
+        #         gpu_view = buf[:length]
+        #         gpu_views.append(gpu_view)
+        #         req_indices.append(i)
+                
+        #         logger.info(
+        #             f"[LMCache] request[{i}] slot_mapping device: {request.slot_mapping.device}, dtype: {request.slot_mapping.dtype}"
+        #         )
+        #         evt = self._slotmap_pool.async_copy_from_cpu(request.slot_mapping, gpu_view)
+        #         copy_events.append(evt)
+        #     for evt in copy_events:
+        #         self._slotmap_pool.wait_on(evt)
+        #     for idx, view in zip(req_indices, gpu_views):
+        #         connector_metadata.requests[idx].slot_mapping = view
+        #         logger.info(
+        #             f"[LMCache] request[{i}] slot_mapping device: {connector_metadata.requests[idx].slot_mapping.device}, dtype: {connector_metadata.requests[idx].slot_mapping.dtype}"
+        #         )
+        
+        mapping_time = time.perf_counter() - mapping_start       
+
+        process_start = time.perf_counter()
         for request in connector_metadata.requests:
+            per_request_start = time.perf_counter()
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
@@ -775,9 +825,10 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
-
+            
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.cuda()
+            
             # NOTE: In PD setting, lmcache_engine.lookup() will always return
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
@@ -788,6 +839,7 @@ class LMCacheConnectorV1Impl:
             )
             skip_leading_tokens = save_spec.skip_leading_tokens
 
+            one_mapping_start = time.perf_counter()
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
             # Align to lmcache chunk size
@@ -799,16 +851,20 @@ class LMCacheConnectorV1Impl:
 
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
-
+            one_mapping_time = time.perf_counter() - one_mapping_start
+            
+            total_number += len(token_ids) - skip_leading_tokens
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s",
+                "(skip_leading_tokens=%d) for request %s, one mapping time: %.2f ms",
                 len(token_ids) - skip_leading_tokens,
                 len(token_ids),
                 skip_leading_tokens,
                 request.req_id,
+                one_mapping_time * 1000,
             )
 
+            store_start = time.perf_counter()
             is_last_prefill = request.is_last_prefill
             if is_last_prefill:
                 request.disagg_spec.is_last_prefill = True
@@ -835,9 +891,24 @@ class LMCacheConnectorV1Impl:
                 logger.warning(
                     "Failed to store KV cache for request %s: %s",
                     request.req_id,
-                    e,
+                    e, 
                 )
-
+            store_time = time.perf_counter() - store_start
+            per_request_end = time.perf_counter()
+            logger.info(
+                "[LMCache] Finished put request %s with %d tokens in %.2f ms, store time: %.2f ms",
+                request.req_id,
+                len(token_ids) - skip_leading_tokens,
+                (per_request_end - per_request_start) * 1000,
+                store_time * 1000,
+            )
+        process_time = time.perf_counter() - process_start
+        
+        end_time = time.perf_counter()
+        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_time) * 1000:.2f} ms, process time: {(process_time) * 1000:.2f} ms, mapping time: {(mapping_time) * 1000:.2f} ms")
+        
+        for bucket, buf in acquired_buffers:
+            self._slotmap_pool.release(bucket, buf)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1075,3 +1146,76 @@ class LMCacheConnectorV1Impl:
             }
 
         return 0, return_params
+
+
+from collections import defaultdict, deque
+from contextlib import contextmanager
+from typing import Deque, Dict, Iterator, Optional, Tuple
+
+def _bucket_of(n: int) -> int:
+    # power-of-two bucket: 1K, 2K, 4K, ...
+    b = 1
+    while b < n:
+        b <<= 1
+    return b if b >= 32 else 32
+
+class GPUSlotMappingPool:
+    
+    def __init__(self, device: torch.device = torch.device("cuda"), max_bucket: int = 1 << 15, num_per_bucket: int = 64):
+        self.device = device
+        self.max_bucket = max_bucket
+        self.num_per_bucket = num_per_bucket
+        self._free: Dict[int, Deque[torch.Tensor]] = defaultdict(deque)
+        self._copy_stream = torch.cuda.Stream(device=device)
+        self._warmup()
+        
+    def _warmup(self):
+        bucket_size = 32
+        while bucket_size <= self.max_bucket:
+            for _ in range(self.num_per_bucket):
+                self._free[bucket_size].append(
+                    torch.empty(bucket_size, dtype=torch.long, device=self.device)
+                )
+            logger.info(f"[Warmup] Initialized {self.num_per_bucket} buffers for bucket size {bucket_size}")
+            bucket_size *= 2
+
+    def _alloc_bucket_tensor(self, bucket: int) -> torch.Tensor:
+        return torch.empty(bucket, dtype=torch.long, device=self.device)
+
+    def acquire(self, length: int) -> Tuple[int, torch.Tensor]:
+        bucket = _bucket_of(length)
+        if bucket > self.max_bucket:
+            raise RuntimeError(
+                f"Requested length {length} exceeds max_bucket {self.max_bucket} "
+                "(strict pool forbids dynamic allocation)."
+            )
+            
+        if self._free[bucket]:
+            buf = self._free[bucket].pop()
+            logger.info(f"[Acquire] bucket={bucket} (size={len(buf)}); remaining={len(self._free[bucket])}")
+            return bucket, buf
+        else:
+            raise RuntimeError(f"No free buffer in bucket={bucket}; warmup pool exhausted.")
+
+    def release(self, bucket: int, tensor: torch.Tensor) -> None:
+        if bucket <= 0:
+            return
+        self._free[bucket].append(tensor)
+
+    def async_copy_from_cpu(self, cpu_tensor: torch.Tensor, dst_view: torch.Tensor) -> torch.cuda.Event:
+        assert cpu_tensor.dtype == torch.long and dst_view.dtype == torch.long
+        n = cpu_tensor.numel()
+        assert dst_view.numel() >= n
+
+        if not cpu_tensor.is_pinned():
+            cpu_tensor = cpu_tensor.pin_memory()
+
+        evt = torch.cuda.Event()
+        with torch.cuda.stream(self._copy_stream):
+            dst_view[:n].copy_(cpu_tensor, non_blocking=True)
+            evt.record(self._copy_stream)
+        return evt
+
+    def wait_on(self, evt: torch.cuda.Event, stream: Optional[torch.cuda.Stream] = None) -> None:
+        s = stream if stream is not None else torch.cuda.current_stream(self.device)
+        s.wait_event(evt)
