@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Standard
+import os
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any, Optional, Union
@@ -569,9 +570,12 @@ class NixlReceiver:
         receiver_host = nixl_config.peer_host
         receiver_init_port = nixl_config.peer_init_port
         receiver_alloc_port = nixl_config.peer_alloc_port
+        receiver_delete_port = os.environ["NIXL_DELETE_PORT"]
+        logger.info(f"receiver_delete_port: {receiver_delete_port}")
 
         receiver_init_url = f"{receiver_host}:{receiver_init_port}"
         receiver_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
+        receiver_delete_url = f"{receiver_host}:{receiver_delete_port}"
 
         self.full_chunk_size = config.chunk_size
 
@@ -591,6 +595,12 @@ class NixlReceiver:
         self._alloc_side_channel = self._context.socket(zmq.REP)
         self._alloc_side_channel.bind(get_zmq_path(receiver_alloc_url, protocol="tcp"))
         self._side_channels.append(self._alloc_side_channel)
+
+        # Delete side channel
+        self._delete_side_channel = self._context.socket(zmq.REP)
+        self._delete_side_channel.bind(get_zmq_path(receiver_delete_url, protocol="tcp"))
+        self._side_channels.append(self._delete_side_channel)
+        
 
         # TODO: might be better to put them into one thread
         # and use asyncio to manage.
@@ -612,6 +622,13 @@ class NixlReceiver:
         self._stat_thread.start()
         self._running_threads.append(self._stat_thread)
 
+        self._delete_thread = threading.Thread(target=self._mem_delete_loop, daemon=True)
+        self._delete_thread.start()
+        self._running_threads.append(self._delete_thread)
+
+        self.deleted_reqs_set = set()
+        self.deleted_reqs_lock = threading.Lock()
+
     def _stat_loop(self):
         while self._running:
             try:
@@ -619,16 +636,56 @@ class NixlReceiver:
                 max_lifespan = self._backend.get_max_lifespan()
                 oldest_req_id = self._backend.get_olddest_req_id()
                 put_speed, get_speed = self._backend.stat()
+                key_length = self._backend.get_data_key_length()
+                valid_obj_num = self._backend.get_num_valid_mem_obj()
                 logger.info(
                     f"[Receiver] Total allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
                     f"max lifespan: {max_lifespan * 1000:.1f}ms, "
                     f"req_id with max lifespan: {oldest_req_id}, "
-                    f"put_speed: {put_speed:.1f} obj/s, get_speed: {get_speed:.1f} obj/s"
+                    f"put_speed: {put_speed:.1f} obj/s, get_speed: {get_speed:.1f} obj/s, "
+                    f"key_length: {key_length}, valid_obj_num: {valid_obj_num}"
                 )
             except Exception as e:
                 logger.exception(f"[Receiver] Exception in stat loop: {e}")
             time.sleep(5)
 
+    def _mem_delete_loop(self):
+        torch.cuda.set_device(self.device)
+        # TODO: `self._running` might not be safe here
+        logger.info(f"Start mem delete loop")
+        while self._running:
+            try:
+                # NOTE: this is a req-reply zmq for now
+                # receive alloc request
+                delete_req_bytes = self._delete_side_channel.recv()
+                delete_req = msgspec.msgpack.decode(delete_req_bytes, type=NixlMsg)
+                assert isinstance(delete_req, NixlAllocRequest), (
+                    "The request from the remote peer is not a NixlAllocRequest"
+                )
+                
+                assert delete_req.delete, "mem_delete_loop can only receive delete request"
+                deleted = self._backend.delete_by_req_id(delete_req.req_id)
+                # append deleted req_id to the set
+                with self.deleted_reqs_lock:
+                    self.deleted_reqs_set.add(delete_req.req_id)
+                self._delete_side_channel.send(msgspec.msgpack.encode(
+                    NixlAllocResponse(remote_indexes=[])))
+                logger.info(
+                    "Received delete request for %s, deleted: %s",
+                    delete_req.req_id,
+                    deleted,
+                )   
+            except zmq.Again as e:  # type: ignore
+                # Handle the timeout when waiting for a message
+                logger.debug(
+                    "Timeout waiting for a message on the side channel: %s",
+                    str(e),
+                )
+                continue
+            except Exception as e:
+                logger.error("Failed to process mem alloc loop: %s", str(e))
+                if self._running:
+                    time.sleep(0.01)
 
     def _allocate_and_put(self, alloc_request: NixlAllocRequest) -> NixlAllocResponse:
         total_allocs = len(alloc_request.keys)
@@ -653,46 +710,31 @@ class NixlReceiver:
             wait_time = 0.2
             decay = 1.5
 
-            if alloc_request.is_cuda:
-                while mem_obj is None:
-                    mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
-                    if mem_obj is None:
-                        logger.warning("Failed to allocate memory object, retrying...")
-                        time.sleep(wait_time)
-                        wait_time *= decay
-            else:
-                while mem_obj is None:
-                    mem_obj = self._backend.allocate_cpu(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
-                    if mem_obj is None:
-                        logger.warning("Failed to allocate cpu memory object, retrying...")
-                        time.sleep(wait_time)
-                        wait_time *= decay
+            while mem_obj is None:
+                req_id = alloc_request.req_id
+                # check if delete signal has been issued, if so, break the loop
+                with self.deleted_reqs_lock:
+                    if req_id in self.deleted_reqs_set:
+                        logger.info(f"req: {req_id} already deleted by delete thread, stop trying to allocate")
+                        break
 
-            # mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=alloc_request.req_id)
+                if alloc_request.is_cuda:
+                    mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt, req_id=req_id)
+                else:
+                    mem_obj = self._backend.allocate_cpu(torch.Size(shape), dtype, fmt, req_id=req_id)
 
-            # TODO(Jiayi): tune this hyperparameters
-            # wait_time = 1
-            # decay = 1.1
-            # max_retries = 5
-            # retry_count = 0
-            # while mem_obj is None:
-            #     if retry_count >= max_retries:
-            #         break
-            #     logger.warning(
-            #         "Failed to allocate memory object, retrying...",
-            #     )
-            #     time.sleep(wait_time)
-            #     wait_time /= decay
-            #     mem_obj = self._backend.allocate(torch.Size(shape), dtype, fmt)
-            #     retry_count += 1
-
-            # if mem_obj is None:
-            #     for mem_obj in mem_objs:
-            #         mem_obj.ref_count_down()
-            #     logger.warning(
-            #         f"Failed to allocate memory object after {max_retries} retries, "
-            #         "returning empty response.")
-            #     return NixlAllocResponse(remote_indexes=[])
+                if mem_obj is None:
+                    logger.warning(f"Failed to allocate memory object for req: {req_id}, retrying...")
+                    time.sleep(wait_time)
+                    wait_time *= decay
+                
+            if mem_obj is None:
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                logger.warning(
+                    f"Failed to allocate memory object for req: {req_id}, "
+                    "returning empty response.")
+                return NixlAllocResponse(remote_indexes=[])
 
             keys.append(key)
             mem_objs.append(mem_obj)
@@ -703,9 +745,10 @@ class NixlReceiver:
 
             self._backend.put(CacheEngineKey.from_string(key), mem_obj)
         if len(keys) > 0: 
-            logger.info(f"put {len(keys)} mem_objs for req: {mem_objs[0].req_id}")
+            logger.info(f"put {len(keys)} mem_objs for req: {mem_objs[0].req_ids}")
 
         return NixlAllocResponse(remote_indexes=alloc_indexes)
+
 
     # TODO: have a loop wrapper to wrap different loops
     def _mem_alloc_loop(self):
@@ -721,22 +764,10 @@ class NixlReceiver:
                 assert isinstance(alloc_req, NixlAllocRequest), (
                     "The request from the remote peer is not a NixlAllocRequest"
                 )
-
                 logger.debug(
-                    "Received allocation request for %s objs",
-                    len(alloc_req.keys),
+                    "Received allocation request %s for %s objs",
+                    alloc_req.req_id, len(alloc_req.keys),
                 )
-                
-                if alloc_req.delete:
-                    deleted = self._backend.delete_by_req_id(alloc_req.req_id)
-                    self._alloc_side_channel.send(msgspec.msgpack.encode(
-                        NixlAllocResponse(remote_indexes=[])))
-                    logger.debug(
-                        "Received delete request for %s, deleted: %s",
-                        alloc_req.req_id,
-                        deleted,
-                    )   
-                    continue
 
                 # NOTE: it's okay to put the memory objs into the storage backend
                 # first because decode vllm will not be able to see the decode

@@ -115,7 +115,7 @@ class NixlBackend(StorageBackendInterface):
                     continue
                 lifespan = time.time() - mem_obj.allocated_ts
                 if max_lifespan < lifespan:
-                    olddest_req_id = mem_obj.req_id
+                    olddest_req_id = mem_obj.req_ids[0]
                 max_lifespan = max(max_lifespan, lifespan)
                 
         return olddest_req_id
@@ -126,23 +126,22 @@ class NixlBackend(StorageBackendInterface):
             for key, mem_obj in self._data.items():
                 if not mem_obj:
                     continue
-                if mem_obj.req_id == req_id:
+                if req_id in mem_obj.req_ids:
                     num_mem_objs += 1
         return num_mem_objs
 
-    def clear_kv_cache(self, req_id: str):
+    def get_data_key_length(self) -> int:
         with self._data_lock:
-            keys_to_delete = []
+            return len(self._data)
+
+    def get_num_valid_mem_obj(self) -> int:
+        num_mem_objs = 0
+        with self._data_lock:
             for key, mem_obj in self._data.items():
                 if not mem_obj:
                     continue
-                if mem_obj.req_id == req_id:
-                    while mem_obj.meta.ref_count > 0:
-                        mem_obj.ref_count_down()
-                    keys_to_delete.append(key)
-
-            for key in keys_to_delete:
-                self._data.pop(key, None)
+                num_mem_objs += 1
+        return num_mem_objs
 
     def stat(self):
         now = time.time()
@@ -186,7 +185,17 @@ class NixlBackend(StorageBackendInterface):
     ):
         with self._data_lock:
             self.put_count += 1
-            self._data[key] = mem_obj
+            if key in self._data:
+                assert len(mem_obj.req_ids) == 1
+                org_mem_obj = self._data[key]
+                logger.warning(f"cache hit for (org) req: {org_mem_obj.req_ids} and {mem_obj.req_ids}, going to merge the req_ids into 1")
+                org_mem_obj.req_ids += mem_obj.req_ids
+                # count up the mem obj, the object gets released only after both request frees it
+                org_mem_obj.ref_count_up()
+                # free the original mem_obj
+                mem_obj.ref_count_down()
+            else:
+                self._data[key] = mem_obj
             
     def batched_allocate(
         self,
@@ -222,7 +231,8 @@ class NixlBackend(StorageBackendInterface):
         mem_obj = self.memory_allocator.allocate(shape=shape, dtype=dtype, fmt=fmt)
         if mem_obj:
             mem_obj.allocated_ts = time.time()
-            mem_obj.req_id = req_id
+            mem_obj.req_ids = [req_id]
+            # mem_obj.req_id = req_id
 
         return mem_obj
     
@@ -237,7 +247,7 @@ class NixlBackend(StorageBackendInterface):
         mem_obj = self.memory_allocator.allocate_cpu(shape=shape, dtype=dtype, fmt=fmt)
         if mem_obj:
             mem_obj.allocated_ts = time.time()
-            mem_obj.req_id = req_id
+            mem_obj.req_ids = [req_id]
 
         return mem_obj
 
@@ -267,11 +277,12 @@ class NixlBackend(StorageBackendInterface):
             for key, mem_obj in self._data.items():
                 if not mem_obj:
                     continue
-                if mem_obj.req_id == req_id:
+                if req_id in mem_obj.req_ids:
                     # Drop all refs so allocator can reclaim pages
-                    while mem_obj.meta.ref_count > 0:
-                        mem_obj.ref_count_down()
-                    keys_to_delete.append(key)
+                    # while mem_obj.meta.ref_count > 0:
+                    mem_obj.ref_count_down()
+                    if mem_obj.meta.ref_count == 0:
+                        keys_to_delete.append(key)
 
             for key in keys_to_delete:
                 if self._data.pop(key, None) is not None:
@@ -334,7 +345,8 @@ class NixlBackend(StorageBackendInterface):
             # NOTE(Jiayi): we assume that the key must be in local data
             # because we are using a push-based transfer
             self.get_count += 1
-            mem_obj = self._data.pop(key, None)
+            mem_obj = self._data.get(key, None)
+            # mem_obj = self._data.pop(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
 
             # NOTE(Jiayi): Currently, we remove the cache from local storage

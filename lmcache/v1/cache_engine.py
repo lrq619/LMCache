@@ -480,25 +480,19 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         count = 0
-        req_id = ""
         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
             count += 1
             memory_obj.ref_count_down()
-            req_id = memory_obj.req_id
 
             # NOTE (ApostaC): This is only for the current implementation:
             # When the object is retrieved back to vLLM, the storage backend
             # will immediately remove the object from itself
             if self.remove_after_retrieve:
-                logger.debug(
-                    f"Removing memory object {len(reordered_keys)} with req_id {req_id} for key {key}"
-                )
-                self.storage_manager.remove(key)
+                if memory_obj.meta.ref_count == 0:
+                    self.storage_manager.remove(key)
                 # self.storage_manager.storage_backends['NixlBackend'].memcheck()
             else:
                 self.storage_manager.batched_unpin([key])
-        num_mem_objs = self.storage_manager.storage_backends['NixlBackend'].get_num_mem_objs(req_id)
-        logger.info(f"After removing mem objs for req_id: {req_id}, there are still {num_mem_objs} left")
 
         total_allocated_size = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
         max_lifespan = self.storage_manager.storage_backends['NixlBackend'].get_max_lifespan()
@@ -506,7 +500,7 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            f"For req_id: {req_id}, Retrieved {retrieved_tokens} "
+            f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens, after retrival, total allocated size: {total_allocated_size/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
         )

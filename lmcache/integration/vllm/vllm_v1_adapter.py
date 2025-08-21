@@ -783,31 +783,31 @@ class LMCacheConnectorV1Impl:
         gpu_views: list[torch.Tensor] = []
         req_indices: list[int] = []
         
-        with nvtx.annotate("LMCache wait_for_save: slotmap copy", color="blue"):
-            for i, request in enumerate(connector_metadata.requests):
-                length = len(request.token_ids)
-                if length == 0:
-                    continue
+        # with nvtx.annotate("LMCache wait_for_save: slotmap copy", color="blue"):
+        #     for i, request in enumerate(connector_metadata.requests):
+        #         length = len(request.token_ids)
+        #         if length == 0:
+        #             continue
 
-                bucket, buf = self._slotmap_pool.acquire(length)
-                acquired_buffers.append((bucket, buf))
+        #         bucket, buf = self._slotmap_pool.acquire(length)
+        #         acquired_buffers.append((bucket, buf))
                 
-                gpu_view = buf[:length]
-                gpu_views.append(gpu_view)
-                req_indices.append(i)
+        #         gpu_view = buf[:length]
+        #         gpu_views.append(gpu_view)
+        #         req_indices.append(i)
                 
-                logger.info(
-                    f"[LMCache] request[{i}] slot_mapping device: {request.slot_mapping.device}, dtype: {request.slot_mapping.dtype}"
-                )
-                evt = self._slotmap_pool.async_copy_from_cpu(request.slot_mapping, gpu_view)
-                copy_events.append(evt)
-            for evt in copy_events:
-                self._slotmap_pool.wait_on(evt)
-            for idx, view in zip(req_indices, gpu_views):
-                connector_metadata.requests[idx].slot_mapping = view
-                logger.info(
-                    f"[LMCache] request[{i}] slot_mapping device: {connector_metadata.requests[idx].slot_mapping.device}, dtype: {connector_metadata.requests[idx].slot_mapping.dtype}"
-                )
+        #         logger.info(
+        #             f"[LMCache] request[{i}] slot_mapping device: {request.slot_mapping.device}, dtype: {request.slot_mapping.dtype}"
+        #         )
+        #         evt = self._slotmap_pool.async_copy_from_cpu(request.slot_mapping, gpu_view)
+        #         copy_events.append(evt)
+        #     for evt in copy_events:
+        #         self._slotmap_pool.wait_on(evt)
+        #     for idx, view in zip(req_indices, gpu_views):
+        #         connector_metadata.requests[idx].slot_mapping = view
+        #         logger.info(
+        #             f"[LMCache] request[{i}] slot_mapping device: {connector_metadata.requests[idx].slot_mapping.device}, dtype: {connector_metadata.requests[idx].slot_mapping.dtype}"
+        #         )
         
         mapping_time = time.perf_counter() - mapping_start       
 
@@ -827,7 +827,7 @@ class LMCacheConnectorV1Impl:
             assert len(slot_mapping) == len(token_ids)
             
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            # slot_mapping = slot_mapping.cuda()
+            slot_mapping = slot_mapping.cuda()
             
             # NOTE: In PD setting, lmcache_engine.lookup() will always return
             # 0 if there is no local storage configured. In this case, we
@@ -891,8 +891,7 @@ class LMCacheConnectorV1Impl:
                 logger.warning(
                     "Failed to store KV cache for request %s: %s",
                     request.req_id,
-                    e,
-                    exc_info=True, 
+                    e, 
                 )
             store_time = time.perf_counter() - store_start
             per_request_end = time.perf_counter()
