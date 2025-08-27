@@ -638,8 +638,10 @@ class NixlReceiver:
                 put_speed, get_speed = self._backend.stat()
                 key_length = self._backend.get_data_key_length()
                 valid_obj_num = self._backend.get_num_valid_mem_obj()
+                instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
                 logger.info(
-                    f"[Receiver] Total allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
+                    f"[ReceiverStat], uuid:{instance_uuid}, "
+                    f"total allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
                     f"max lifespan: {max_lifespan * 1000:.1f}ms, "
                     f"req_id with max lifespan: {oldest_req_id}, "
                     f"put_speed: {put_speed:.1f} obj/s, get_speed: {get_speed:.1f} obj/s, "
