@@ -107,7 +107,7 @@ class NixlBackend(StorageBackendInterface):
         return max_lifespan
 
     def get_olddest_req_id(self):
-        olddest_req_id = ""
+        olddest_req_ids = ""
         max_lifespan = 0
         with self._data_lock:
             for key, mem_obj in self._data.items():
@@ -115,10 +115,11 @@ class NixlBackend(StorageBackendInterface):
                     continue
                 lifespan = time.time() - mem_obj.allocated_ts
                 if max_lifespan < lifespan:
-                    olddest_req_id = mem_obj.req_ids[0]
+                    olddest_req_ids = mem_obj.req_ids
                 max_lifespan = max(max_lifespan, lifespan)
                 
-        return olddest_req_id
+        return olddest_req_ids
+
 
     def get_num_mem_objs(self, req_id: str) -> int:
         num_mem_objs = 0
