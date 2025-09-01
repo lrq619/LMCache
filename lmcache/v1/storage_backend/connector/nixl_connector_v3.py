@@ -633,6 +633,7 @@ class NixlReceiver:
         while self._running:
             try:
                 total_allocated_size = self._backend.get_allocated_size()
+                cpu_total_allocated_size = self._backend.get_cpu_allocated_size()
                 max_lifespan = self._backend.get_max_lifespan()
                 oldest_req_id = self._backend.get_olddest_req_id()
                 put_speed, get_speed = self._backend.stat()
@@ -641,7 +642,9 @@ class NixlReceiver:
                 instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
                 logger.info(
                     f"[ReceiverStat], uuid:{instance_uuid}, "
-                    f"total allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
+                    f"total allocated size (cpu+gpu): {total_allocated_size / (1024*1024):.2f} MB, "
+                    f"total allocated size for cpu: {cpu_total_allocated_size/ (1024*1024):.2f} MB, "
+                    f"total allocated size for gpu: {(total_allocated_size - cpu_total_allocated_size)/ (1024*1024):.2f} MB, "
                     f"max lifespan: {max_lifespan * 1000:.1f}ms, "
                     f"req_id with max lifespan: {oldest_req_id}, "
                     f"put_speed: {put_speed:.1f} obj/s, get_speed: {get_speed:.1f} obj/s, "
@@ -649,7 +652,7 @@ class NixlReceiver:
                 )
             except Exception as e:
                 logger.exception(f"[Receiver] Exception in stat loop: {e}")
-            time.sleep(5)
+            time.sleep(1)
 
     def _mem_delete_loop(self):
         torch.cuda.set_device(self.device)

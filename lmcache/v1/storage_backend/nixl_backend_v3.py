@@ -96,6 +96,9 @@ class NixlBackend(StorageBackendInterface):
     def get_allocated_size(self):
         return self.memory_allocator.total_allocated_size
 
+    def get_cpu_allocated_size(self):
+        return self.memory_allocator.cpu_total_allocated_size
+
     def get_max_lifespan(self):
         max_lifespan = 0
         with self._data_lock:
