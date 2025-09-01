@@ -191,6 +191,8 @@ class _TaskCtx:
     future: Future
     local_indexes: Optional[List[int]] = None
     remote_indexes: Optional[List[int]] = None
+    start_ts_ms: Optional[float] = None
+    end_ts_ms: Optional[float] = None
 
 class NixlSender:
     """Handles sending data through a NixlPipe."""
@@ -471,12 +473,15 @@ class NixlSender:
     
     @_lmcache_nvtx_annotate
     def _submit_send_nb(self, ctx: _TaskCtx):
+        start = time.perf_counter()
+        
         receiver_id = ctx.receiver_id
         is_cuda = self._remote_xfer_handlers_is_cuda_dict.get(receiver_id, True)
         agent = self._nixl_agent if is_cuda else self._nixl_cpu_agent
         wrapper = self._sender_nixl_wrapper if is_cuda else self._sender_cpu_nixl_wrapper
         remote_hdl = self._remote_xfer_handlers_dict[receiver_id]
 
+        transfer_start = time.perf_counter()
         handle = agent.make_prepped_xfer(
             "WRITE",
             wrapper.xfer_handler,
@@ -484,10 +489,17 @@ class NixlSender:
             remote_hdl,
             ctx.remote_indexes,
         )
+        transfer_end = time.perf_counter()
+        logger.info(f"making handler takes: {transfer_end-transfer_start}")
+        
         # 提交（不要等待）
         logger.info("submitting xfer handle=%s for req_id=%s", handle, ctx.req_id)
+        ctx.start_ts_ms = time.time() * 1000 
         with nvtx.annotate("launch transfer", color="yellow"):
+            transfer_start = time.perf_counter()
             agent.transfer(handle)
+            transfer_end = time.perf_counter()
+            logger.info(f"transfer call takes: {transfer_end-transfer_start}")
 
         # 控制全局在途上限（可选：如超过则下个 tick 再检查）
         if len(self._inflight_xfers) >= _MAX_INFLIGHT_XFER_GLOBAL:
@@ -496,6 +508,9 @@ class NixlSender:
         # 记录在途
         mem_objs = ctx.task.mem_objs
         self._inflight_xfers[handle] = (agent, ctx, mem_objs)
+        
+        end = time.perf_counter()
+        logger.info(f"_submit_send_nb call takes: {transfer_end-transfer_start}")
         
     @_lmcache_nvtx_annotate
     def _poll_transfers(self) -> bool:
@@ -522,6 +537,8 @@ class NixlSender:
             self._inflight_xfers.pop(handle, None)
 
             if st == "DONE":
+                ctx.end_ts_ms = time.time() * 1000
+                logger.info(f"transfer DONE for req_id={ctx.req_id}, duration: {ctx.end_ts_ms - ctx.start_ts_ms} ms")
                 self._finish_ctx_ok(ctx)
             else:
                 self._fail_ctx(ctx, RuntimeError(f"send error, status={st}"))
@@ -1150,6 +1167,7 @@ class NixlReceiver:
                 # NOTE: this is a req-reply zmq for now
                 # receive alloc request
                 # alloc_req_bytes = self._alloc_side_channel.recv()
+                # alloc_req = msgspec.msgpack.decode(alloc_req_bytes, type=NixlMsg)
                 frames = self._alloc_side_channel.recv_multipart()
                 if len(frames) != 3:
                     logger.warning("alloc: bad frame count=%d", len(frames))
