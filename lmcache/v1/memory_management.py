@@ -1093,7 +1093,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             return
         if memory_obj.meta.shape != self.shape:
             page_idx = memory_obj.meta.address
-            if (memory_obj.tensor.is_cuda):
+            if (memory_obj.is_cuda):
                 memory_obj.raw_data = self.paged_buffers[page_idx]
             else:
                 memory_obj.raw_data = self.cpu_paged_buffers[page_idx]
@@ -1102,7 +1102,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
-        if (memory_obj.tensor.is_cuda):
+        if (memory_obj.is_cuda):
             self.free_blocks.append(memory_obj)
         else:
             self.cpu_free_blocks.append(memory_obj)

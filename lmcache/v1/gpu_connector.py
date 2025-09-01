@@ -487,7 +487,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         with nvtx.annotate("from gpu kernel", color="blue"):
             # if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            if memory_obj.tensor.is_cuda:
+            if memory_obj.is_cuda:
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
                     kv_cache_pointers,
