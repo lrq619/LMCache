@@ -314,12 +314,16 @@ class NixlBackend(StorageBackendInterface):
             mem_obj.ref_count_up()
 
         try:
+            logger.info("debug: calling prepare_send")
             self._nixl_channel.prepare_send(
                 keys=keys,
                 mem_objs=memory_objs,
                 transfer_spec=transfer_spec,
             )
         except Exception as e:
+            import traceback
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            logger.error("failed:\n%s", tb)
             for mem_obj in memory_objs:
                 mem_obj.ref_count_down()
             raise e

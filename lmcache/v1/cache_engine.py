@@ -53,6 +53,7 @@ from lmcache.v1.token_database import (
     TokenDatabase,
 )
 import socket
+import nvtx
 
 logger = init_logger(__name__)
 
@@ -197,36 +198,37 @@ class LMCacheEngine:
         process_time = time.perf_counter() - t
         
         allocate_total_start = time.perf_counter()
-        for start, end, key in process_tokens:
-            assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
-                continue
-            # Allocate the memory object
-            num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
-            kv_dtype = self.metadata.kv_dtype
+        with nvtx.annotate("process_tokens", color="pink"):
+            for start, end, key in process_tokens:
+                assert isinstance(key, CacheEngineKey)
+                if self.storage_manager.contains(key):
+                    continue
+                # Allocate the memory object
+                num_tokens = end - start
+                kv_shape = self.gpu_connector.get_shape(num_tokens)
+                kv_dtype = self.metadata.kv_dtype
 
-            # TODO (Jiayi): should be batched in the future
-            transfer_spec = None
-            if "transfer_spec" in kwargs:
-                transfer_spec = kwargs["transfer_spec"]
-            if self._is_same_node(transfer_spec.receiver_info.receiver_host):
-                memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
-            else:
-                memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
-            if memory_obj is None:
-                logger.warning(
-                    "Failed to allocate memory for the KV cache.\n"
-                    "The KV cache will not be stored."
-                )
-                break
+                # TODO (Jiayi): should be batched in the future
+                transfer_spec = None
+                if "transfer_spec" in kwargs:
+                    transfer_spec = kwargs["transfer_spec"]
+                if self._is_same_node(transfer_spec.receiver_info.receiver_host):
+                    memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+                else:
+                    memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
+                if memory_obj is None:
+                    logger.warning(
+                        "Failed to allocate memory for the KV cache.\n"
+                        "The KV cache will not be stored."
+                    )
+                    break
 
-            starts.append(start)
-            ends.append(end)
-            keys.append(key)
-            memory_objs.append(memory_obj)
+                starts.append(start)
+                ends.append(end)
+                keys.append(key)
+                memory_objs.append(memory_obj)
 
-            tot_kv_size += memory_obj.get_size()
+                tot_kv_size += memory_obj.get_size()
         allocate_total_time = time.perf_counter() - allocate_total_start
 
         if memory_objs == []:

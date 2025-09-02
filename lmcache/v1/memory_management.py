@@ -992,6 +992,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
+        logger.info(f"allocate cpu memory, allocate block {free_block.tensor.is_cuda}, free blocks left {len(self.cpu_free_blocks)}")
         return free_block
 
     @_lmcache_nvtx_annotate
@@ -1092,7 +1093,10 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             return
         if memory_obj.meta.shape != self.shape:
             page_idx = memory_obj.meta.address
-            memory_obj.raw_data = self.paged_buffers[page_idx]
+            if (memory_obj.is_cuda):
+                memory_obj.raw_data = self.paged_buffers[page_idx]
+            else:
+                memory_obj.raw_data = self.cpu_paged_buffers[page_idx]
 
         # memory_obj.invalidate()
 

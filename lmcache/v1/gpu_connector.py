@@ -487,7 +487,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         with nvtx.annotate("from gpu kernel", color="blue"):
             # if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            if memory_obj.tensor.is_cuda:
+            if memory_obj.is_cuda:
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
                     kv_cache_pointers,
@@ -512,11 +512,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
+        # if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -530,6 +530,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
+        
+        if not memory_objs[0].tensor.is_cuda:
+            torch.cuda.synchronize()
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
