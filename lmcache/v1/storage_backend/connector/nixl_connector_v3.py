@@ -395,13 +395,13 @@ class NixlSender:
                 peer["pending"][req_id] = ctx
             else:
                 try:
-                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer["sock"]}")
+                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer['sock']}")
                     peer["sock"].send_multipart([req_id.encode(), mv], flags=zmq.NOBLOCK, copy=False)
-                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer["sock"]} peer is {peer}")
+                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer['sock']} peer is {peer}")
                     peer["pending"][req_id] = ctx
                     peer["inflight"] += 1
                 except zmq.Again as e:
-                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer["sock"]}")
+                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer['sock']}")
                     import traceback
                     tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
                     logger.error("failed:\n%s", tb)
@@ -443,7 +443,7 @@ class NixlSender:
                 req_id = str(req_id.decode())
                 logger.info(f"alloc got-reply req_id={req_id}")
 
-                logger.info(f"pending add: rid={rid}; pending_keys={list(peer["pending"].keys())}, peer is {peer}")
+                logger.info(f"pending add: rid={rid}; pending_keys={list(peer['pending'].keys())}, peer is {peer}")
                 ctx: _TaskCtx = peer["pending"].pop(req_id, None)
                 peer["inflight"] = max(0, peer["inflight"] - 1)
 
