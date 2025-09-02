@@ -308,6 +308,7 @@ class NixlSender:
         alloc_request.is_cuda = self._remote_xfer_handlers_is_cuda_dict.get(receiver_id, True)
 
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
+        logger.info(f"received alloc_response for req: {req_id}")
 
         # send kv
         local_indexes = sender_task.get_local_indexes()
@@ -318,7 +319,18 @@ class NixlSender:
             sender_task.free_mem_objs()
             raise RuntimeError(
                 f"Failed to allocate memory objects for request ID: {req_id}")
-        self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
+        logger.info(f"going to do blocking send for req: {req_id}")
+        try:
+            self._blocking_send(req_id, receiver_id, local_indexes, remote_indexes)
+        except Exception as e:
+            logger.warning(
+                "Failed to do blocking send for request: %s: %s",
+                req_id,
+                e, 
+            )
+            self._send_error_msg(req_id)
+            sender_task.free_mem_objs()
+            raise e
         logger.info(f"transfer spec: {transfer_spec} for req: {req_id}")
         # Below logic ensures that: each req_id must send notify/error msg once and only once
         if transfer_spec.is_last_prefill:
@@ -712,8 +724,8 @@ class NixlReceiver:
                 num_alloc_tokens = self.full_chunk_size
 
             mem_obj = None
-            wait_time = 0.2
-            decay = 1.5
+            wait_time = 0.05
+            decay = 1.1
 
             while mem_obj is None:
                 req_id = alloc_request.req_id
@@ -769,7 +781,7 @@ class NixlReceiver:
                 assert isinstance(alloc_req, NixlAllocRequest), (
                     "The request from the remote peer is not a NixlAllocRequest"
                 )
-                logger.debug(
+                logger.info(
                     "Received allocation request %s for %s objs",
                     alloc_req.req_id, len(alloc_req.keys),
                 )
@@ -780,9 +792,9 @@ class NixlReceiver:
                 alloc_resp = self._allocate_and_put(alloc_req)
                 
 
-                logger.debug(
-                    "Replying allocation response for %s objs",
-                    len(alloc_resp.remote_indexes),
+                logger.info(
+                    "Replying allocation response for %s objs, req_id: %s",
+                    len(alloc_resp.remote_indexes), alloc_req.req_id
                 )
 
                 # send back response
@@ -790,7 +802,7 @@ class NixlReceiver:
 
             except zmq.Again as e:  # type: ignore
                 # Handle the timeout when waiting for a message
-                logger.debug(
+                logger.info(
                     "Timeout waiting for a message on the side channel: %s",
                     str(e),
                 )
