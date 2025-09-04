@@ -548,6 +548,7 @@ class NixlSender:
     def _finish_ctx_ok(self, ctx: _TaskCtx):
         req_id = ctx.req_id
         task = ctx.task
+        logger.info(f"request {req_id} finished without any error!")
 
         # last prefill -> 立即通知 & 取消 2s 错误定时器
         if task.transfer_spec.is_last_prefill:
@@ -568,6 +569,7 @@ class NixlSender:
 
     def _fail_ctx(self, ctx: _TaskCtx, err: Exception):
         req_id = ctx.req_id
+        logger.error(f"request {req_id} failed with {err}! Going to send error msg")
         try:
             self._send_error_msg(req_id)
         except Exception:
@@ -605,7 +607,7 @@ class NixlSender:
 
         req_id = sender_task.req_id
         rid = sender_task.receiver_info.receiver_id
-        logger.debug("prepare_send_async: enqueue req=%s -> receiver=%s (%d objs)",
+        logger.info("prepare_send_async: enqueue req=%s -> receiver=%s (%d objs)",
                      req_id, rid, len(keys))
 
         fut = Future()
