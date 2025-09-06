@@ -199,16 +199,16 @@ def CreateStorageBackends(
         storage_backends[backend_name] = remote_backend
 
     # Create dynamic backends from configuration
-    create_dynamic_backends(
-        config,
-        metadata,
-        loop,
-        memory_allocator,
-        local_cpu_backend,
-        dst_device,
-        lookup_server,
-        storage_backends,
-    )
+    # create_dynamic_backends(
+    #     config,
+    #     metadata,
+    #     loop,
+    #     memory_allocator,
+    #     local_cpu_backend,
+    #     dst_device,
+    #     lookup_server,
+    #     storage_backends,
+    # )
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
