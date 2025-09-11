@@ -56,6 +56,8 @@ from lmcache.v1.token_database import (
     TokenDatabase,
 )
 
+import socket
+
 logger = init_logger(__name__)
 
 
@@ -177,6 +179,10 @@ class LMCacheEngine:
             logger.info("Post-initializing LMCacheEngine")
             self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
+            
+    def _is_same_node(self, receiver_host: str) -> bool:
+        host_name = socket.gethostname()
+        return receiver_host == host_name
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -245,6 +251,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        logger.info(f"store tokens {tokens}")
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
@@ -259,15 +266,27 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(
-                kv_shape, kv_dtype, busy_loop=False
-            )
-            if memory_obj is None:
-                logger.warning(
-                    "Local cpu memory under pressure so"
-                    " choosing to not store the KV cache."
-                )
-                break
+            
+            # memory_obj = self.storage_manager.allocate(
+            #     kv_shape, kv_dtype, busy_loop=False
+            # )
+            
+            transfer_spec = None
+            if "transfer_spec" in kwargs:
+                transfer_spec = kwargs["transfer_spec"]
+            memory_obj = None
+            retry_interval = 0.1
+            while memory_obj is None:
+                if self._is_same_node(transfer_spec.receiver_info.receiver_host):
+                    logger.info(f"host is {socket.gethostname()}, receiver is {transfer_spec.receiver_info.receiver_host}, allocating cuda memory")
+                    memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+                else:
+                    logger.info(f"host is {socket.gethostname()}, receiver is {transfer_spec.receiver_info.receiver_host}, allocating cpu memory")
+                    memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
+                if memory_obj is None:
+                    logger.warning("Failed to allocate memory for the KV cache. Retrying...")
+                    time.sleep(retry_interval)
+
 
             starts.append(start)
             ends.append(end)
@@ -488,23 +507,24 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         for key, memory_obj, _, _ in reordered_chunks:
-            if self.remove_after_retrieve and not self._is_passive():
-                self.storage_manager.remove(key)
+            logger.info(f"before ref down memobj ref count = {memory_obj.meta.ref_count}")
             memory_obj.ref_count_down()
+            logger.info(f"after ref down memobj ref count = {memory_obj.meta.ref_count}")
+            if self.remove_after_retrieve:
+                if memory_obj.meta.ref_count == 0:
+                    self.storage_manager.remove(key)
 
         onload_time = time.perf_counter() - t
 
+        total_allocated_size, total_allocated_size_cpu = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
+        max_lifespan = self.storage_manager.storage_backends['NixlBackend'].get_max_lifespan()
+        olddest_req_id = self.storage_manager.storage_backends['NixlBackend'].get_olddest_req_id()
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
-            " cost %.4f ms, throughput: %.4f GB/s;",
-            retrieved_tokens,
-            num_required_tokens,
-            len(tokens),
-            tot_kv_size / 1024**3,
-            onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3,
+            f"Retrieved {retrieved_tokens} "
+            f"out of {num_required_tokens} "
+            f"out of total {len(tokens)} tokens, after retrival, total gpu allocated size: {total_allocated_size/(1024**2)} MB, total cpu allocated size: {total_allocated_size_cpu/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
         )
         return ret_mask
 
@@ -731,7 +751,9 @@ class LMCacheEngine:
                     end = prev_end
                     return prev_end
                 else:
+                    logger.info(f"search range is {search_range}, tokens is {tokens}")
                     if self.storage_manager.contains(key, search_range, pin):
+                        logger.info(f"contains the key {key}")
                         if pin:
                             self.lookup_pins[lookup_id].append(  # type: ignore
                                 key
@@ -1249,11 +1271,27 @@ class LMCacheEngineBuilder:
                     metadata.kv_dtype,
                     MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 )
-                if config.local_cpu:
-                    max_local_cpu_size = config.max_local_cpu_size
-                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
-                        int(max_local_cpu_size * 1024**3)
+                # if config.local_cpu:
+                #     max_local_cpu_size = config.max_local_cpu_size
+                #     nixl_cpu_mem_allocator.init_cpu_memory_allocator(
+                #         int(max_local_cpu_size * 1024**3)
+                #     )
+                try:
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=True,
                     )
+                except RuntimeError as e:
+                    logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=False,
+                    )
+                nixl_cpu_mem_allocator.init_cpu_buffer(cpu_buffer)
                 return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 

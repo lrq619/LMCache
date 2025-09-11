@@ -23,6 +23,8 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
 )
 from lmcache.v1.storage_backend.connector.nixl_utils import NixlConfigXpYd, NixlRole
 
+import time
+
 logger = init_logger(__name__)
 
 
@@ -50,6 +52,13 @@ class NixlBackend(AllocatorBackendInterface):
             could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
+        self.last_count_time = time.time()
+
+        self.last_put_count = 0
+        self.put_count = 0
+
+        self.last_get_count = 0
+        self.get_count = 0
 
         # NOTE(Jiayi): sender/prefiller will not use this pool;
         # only receiver/decoder will.
@@ -66,6 +75,73 @@ class NixlBackend(AllocatorBackendInterface):
 
         self._nixl_channel = NixlChannel(nixl_config, config, self)
 
+    def memcheck(self):
+        self.memory_allocator.memcheck()
+
+    def get_allocated_size(self):
+        return self.memory_allocator.nixl_allocator.total_allocated_size, self.memory_allocator.nixl_allocator.cpu_total_allocated_size
+
+    def get_max_lifespan(self):
+        max_lifespan = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                lifespan = time.time() - mem_obj.allocated_ts
+                max_lifespan = max(max_lifespan, lifespan)
+        return max_lifespan
+
+    def get_olddest_req_id(self):
+        olddest_req_id = ""
+        max_lifespan = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                lifespan = time.time() - mem_obj.allocated_ts
+                if max_lifespan < lifespan:
+                    olddest_req_id = mem_obj.req_ids[0]
+                max_lifespan = max(max_lifespan, lifespan)
+                
+        return olddest_req_id
+
+    def get_num_mem_objs(self, req_id: str) -> int:
+        num_mem_objs = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                if req_id in mem_obj.req_ids:
+                    num_mem_objs += 1
+        return num_mem_objs
+
+    def get_data_key_length(self) -> int:
+        with self._data_lock:
+            return len(self._data)
+
+    def get_num_valid_mem_obj(self) -> int:
+        num_mem_objs = 0
+        with self._data_lock:
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                num_mem_objs += 1
+        return num_mem_objs
+
+    def stat(self):
+        now = time.time()
+        duration = now - self.last_count_time
+        new_put = self.put_count - self.last_put_count
+        new_get = self.get_count - self.last_get_count
+        put_speed = new_put / duration
+        get_speed = new_get / duration
+
+        self.last_count_time = now
+        self.last_put_count = self.put_count
+        self.last_get_count = self.get_count
+        return put_speed, get_speed
+
+
     # TODO(Jiayi): handle `pin` smantics
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
@@ -77,12 +153,15 @@ class NixlBackend(AllocatorBackendInterface):
         :return: True if the key exists, False otherwise
         """
         assert isinstance(key, CacheEngineKey)
+        logger.info(f"search for key {key}")
         with self._data_lock:
-            if mem_obj := self._data.get(key, None):
-                if pin:
-                    mem_obj.ref_count_up()
-                return True
-            return False
+            return key in self._data
+        # with self._data_lock:
+        #     if mem_obj := self._data.get(key, None):
+        #         if pin:
+        #             mem_obj.ref_count_up()
+        #         return True
+        #     return False
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -100,7 +179,19 @@ class NixlBackend(AllocatorBackendInterface):
     ):
         assert isinstance(key, CacheEngineKey)
         with self._data_lock:
-            self._data[key] = mem_obj
+            self.put_count += 1
+            if key in self._data:
+                assert len(mem_obj.req_ids) == 1
+                org_mem_obj = self._data[key]
+                logger.warning(f"cache hit for (org) req: {org_mem_obj.req_ids} and {mem_obj.req_ids}, going to merge the req_ids into 1")
+                org_mem_obj.req_ids += mem_obj.req_ids
+                # count up the mem obj, the object gets released only after both request frees it
+                org_mem_obj.ref_count_up()
+                # free the original mem_obj
+                mem_obj.ref_count_down()
+            else:
+                logger.info(f"put key: {key}")
+                self._data[key] = mem_obj
 
     def allocate(
         self,
@@ -109,6 +200,7 @@ class NixlBackend(AllocatorBackendInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
+        req_id: str = "",
     ) -> Optional[MemoryObj]:
         """
         Allocate a zero-copy write object for the given shape and dtype.
@@ -120,6 +212,25 @@ class NixlBackend(AllocatorBackendInterface):
         mem_obj = self.memory_allocator.allocate(
             shape=shape, dtype=dtype, fmt=fmt, allocator_type="nixl"
         )
+        if mem_obj:
+            mem_obj.allocated_ts = time.time()
+            mem_obj.req_ids = [req_id]
+
+        return mem_obj
+    
+    def allocate_cpu(
+        self,
+        shape: torch.Size,
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = False,
+        busy_loop: bool = True,
+        req_id: str = "",
+    ) -> MemoryObj:
+        mem_obj = self.memory_allocator.allocate_cpu(shape=shape, dtype=dtype, fmt=fmt)
+        if mem_obj:
+            mem_obj.allocated_ts = time.time()
+            mem_obj.req_ids = [req_id]
 
         return mem_obj
 
@@ -147,6 +258,7 @@ class NixlBackend(AllocatorBackendInterface):
         for key in keys:
             assert isinstance(key, CacheEngineKey)
 
+        logger.info(f"send keys: {keys}")
         self._nixl_channel.prepare_send(
             keys=keys,  # type: ignore
             mem_objs=memory_objs,
@@ -208,12 +320,14 @@ class NixlBackend(AllocatorBackendInterface):
 
         :param key: The key to remove.
         """
+        # with self._data_lock:
+        #     if mem_obj := self._data.get(key, None):
+        #         if mem_obj.get_ref_count() == 1:
+        #             del self._data[key]
+        #         return True
+        #     return False
         with self._data_lock:
-            if mem_obj := self._data.get(key, None):
-                if mem_obj.get_ref_count() == 1:
-                    del self._data[key]
-                return True
-            return False
+            return self._data.pop(key, None) is not None
 
     def close(self) -> None:
         """

@@ -101,6 +101,9 @@ class MemoryObjMetadata:
 
     # Positions when the cache is stored
     cached_positions: Optional[torch.Tensor] = None
+    
+    # Storage backend location
+    is_cuda: Optional[bool] = True
 
     def to_dict(self):
         # Note(Kuntai): this is used for serializing MemoryObjMetadata via
@@ -113,6 +116,7 @@ class MemoryObjMetadata:
             "phy_size": self.phy_size,
             "ref_count": self.ref_count,
             "fmt": self.fmt.value,
+            "is_cuda": self.is_cuda,
         }
 
     @staticmethod
@@ -308,6 +312,7 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        self.is_cuda = (raw_data.device.type == "cuda")
 
     def invalidate(self):
         self.valid = False
@@ -413,9 +418,10 @@ class TensorMemoryObj(MemoryObj):
             return None
         assert self.meta.dtype is not None
         # TODO(Jiayi): consider caching the `get_size()`
-        return (
-            self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
-        )
+        return self.raw_data.view(self.meta.dtype).view(self.meta.shape)
+        # return (
+        #     self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
+        # )
 
     @property
     def byte_array(self) -> bytes:
@@ -1002,6 +1008,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
         self.align_bytes = num_elements * self.bytes_per_element
 
+        self.buffer_size = (self.buffer_size // self.align_bytes) * self.align_bytes
+        self.buffer = self.buffer[:self.buffer_size]
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
             f" multiple of align bytes {self.align_bytes}"
@@ -1027,6 +1035,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 1,  # ref_count=1
                 0,  # pin_count=0
                 self.fmt,
+                True # is_cuda=True
             )
             mem_obj = TensorMemoryObj(
                 raw_data=buf,
@@ -1045,6 +1054,39 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
         return shape.numel() * dtype.itemsize
+
+    def init_cpu_buffer(self, cpu_buffer: torch.Tensor):
+        self.cpu_buffer = cpu_buffer.view(torch.uint8).flatten()
+        self.cpu_buffer_size = self.cpu_buffer.numel() * self.cpu_buffer.element_size()
+        self.cpu_buffer_ptr = self.cpu_buffer.data_ptr()
+        
+        self.cpu_buffer_size = (self.cpu_buffer_size // self.align_bytes) * self.align_bytes
+        self.cpu_buffer = self.cpu_buffer[:self.cpu_buffer_size]
+        
+        self.cpu_paged_buffers = torch.split(self.cpu_buffer, self.align_bytes, dim=0)
+        self.cpu_free_blocks = deque()
+        
+        for idx, buf in enumerate(self.cpu_paged_buffers):
+            metadata = MemoryObjMetadata(
+                shape=self.shape,
+                dtype=self.dtype,
+                address=idx,
+                phy_size=self.align_bytes,  # 1 page
+                ref_count=1,  # ref_count=1
+                pin_count=0,  # is_pin=False
+                fmt=self.fmt,
+                is_cuda=False,  # CPU buffer
+            )
+            mem_obj = TensorMemoryObj(
+                raw_data=buf,
+                metadata=metadata,
+                parent_allocator=self,
+            )
+            self.cpu_free_blocks.append(mem_obj)
+        logger.info(f"total free blocks on cpu is {len(self.cpu_free_blocks)}")
+        self.cpu_num_active_allocations = 0
+        self.cpu_total_allocated_size = 0
+        
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1088,6 +1130,49 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
+        return free_block
+    
+    @_lmcache_nvtx_annotate
+    def allocate_cpu(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[TensorMemoryObj]:
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
+
+        assert dtype is not None, "dtype must be specified"
+
+        try:
+            free_block = self.cpu_free_blocks.popleft()
+        except IndexError:
+            logger.debug(
+                f"Failed to allocate cpu memory for "
+                f"tensor({shape}, {dtype}) because "
+                "no free blocks is available"
+            )
+            return None
+
+        # TODO (Jiayi): This is a bit redundant.
+        free_block.meta.shape = shape
+        free_block.meta.fmt = fmt
+        free_block.meta.ref_count = 1
+
+        if shape != self.shape:
+            size_in_bytes = shape.numel() * self.bytes_per_element
+            free_block.raw_data = free_block.raw_data[:size_in_bytes]
+
+        # TODO (Jiayi): need a flag to drop these debug ops
+        # Update debug status
+        self.num_active_allocations += 1
+        self.cpu_total_allocated_size += self.align_bytes
+        # self.total_allocated_size += self.align_bytes
+        # self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+
+        # Allocate the block
+        logger.info(f"allocate cpu memory, allocate block {free_block.tensor.is_cuda}, free blocks left {len(self.cpu_free_blocks)}")
         return free_block
 
     @_lmcache_nvtx_annotate
@@ -1150,9 +1235,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             return
         if memory_obj.meta.shape != self.shape:
             page_idx = memory_obj.meta.address
-            memory_obj.raw_data = self.paged_buffers[page_idx]
+            if (memory_obj.is_cuda):
+                memory_obj.raw_data = self.paged_buffers[page_idx]
+            else:
+                memory_obj.raw_data = self.cpu_paged_buffers[page_idx]
 
-        self.free_blocks.append(memory_obj)
+        # self.free_blocks.append(memory_obj)
 
         # memory_obj.invalidate()
 
@@ -1160,11 +1248,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # NOTE (Jiayi): the following code is not thread-safe but
         # is tolerable as this is only used for debugging purposes.
         # Update debug status
-        self.total_allocated_size -= self.align_bytes
-        self.num_active_allocations -= 1
+        if (memory_obj.is_cuda):
+            logger.info("free cuda memobj")
+            self.free_blocks.append(memory_obj)
+            self.total_allocated_size -= self.align_bytes
+        else:
+            self.cpu_free_blocks.append(memory_obj)
+            logger.info(f"free blocks left {len(self.cpu_free_blocks)}")
+            self.cpu_total_allocated_size -= self.align_bytes
+        self.num_active_allocations = max(0, self.num_active_allocations - 1)
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
+        
     @_lmcache_nvtx_annotate
     def batched_free(
         self,
@@ -1231,6 +1325,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+        del self.cpu_buffer
 
 
 class BufferAllocator(MemoryAllocatorInterface):
@@ -1805,6 +1900,9 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
     def __init__(self):
         pass
 
+    def init_cpu_buffer(self, cpu_buffer: torch.Tensor):
+        self.nixl_allocator.init_cpu_buffer(cpu_buffer)
+
     def init_nixl_memory_allocator(
         self,
         tensor: torch.Tensor,
@@ -1838,6 +1936,16 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
             return self.cpu_allocator.allocate(shape, dtype, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
+        
+    @_lmcache_nvtx_annotate
+    def allocate_cpu(
+        self,
+        shape: Union[torch.Size, Tuple[int, ...]],
+        dtype: Optional[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        return self.nixl_allocator.allocate_cpu(shape, dtype, fmt)
 
     def batched_allocate(
         self,

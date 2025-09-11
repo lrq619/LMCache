@@ -49,6 +49,8 @@ from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
     NixlReceiverInfo,
 )
 
+import time
+
 if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -376,7 +378,7 @@ class ReqMeta:
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     if lmcache_config.enable_nixl:
-        return False
+        return True
     else:
         return True
 
@@ -884,6 +886,10 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+        compute_time = time.perf_counter()
+        torch.cuda.synchronize()
+        compute_end = time.perf_counter()
+        logger.info(f"compute time is {compute_end - compute_time} s")
 
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
@@ -1024,6 +1030,7 @@ class LMCacheConnectorV1Impl:
 
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
+            logger.info(f"look up for tokens: {token_ids[: -self.skip_last_n_tokens]}")
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids[: -self.skip_last_n_tokens],
                 lookup_id=lookup_id,
