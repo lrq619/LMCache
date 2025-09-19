@@ -553,10 +553,15 @@ class LMCacheConnectorV1Impl:
             last_idx = idx
 
         self.layerwise_retrievers = []
+        
+        start_load_time = time.perf_counter()
+        req_counter = 0
+        token_counter = 0
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
 
+            req_counter += 1
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = request.slot_mapping.cuda()
@@ -624,7 +629,10 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
-
+                token_counter += num_retrieved_tokens
+        end_load_time = time.perf_counter()
+        logger.info(f"[LMCache] Finished load kv for {req_counter} requests with {token_counter} tokens in {(end_load_time - start_load_time) * 1000:.2f} ms")
+        
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -811,6 +819,7 @@ class LMCacheConnectorV1Impl:
         with nvtx.annotate("sync", color="yellow"):
             torch.cuda.synchronize()
 
+        start_store = time.perf_counter()
         for request in connector_metadata.requests:
             with nvtx.annotate("prepare", color="pink"):
                 save_spec = request.save_spec
@@ -877,7 +886,7 @@ class LMCacheConnectorV1Impl:
                 )
         
         end_time = time.perf_counter()
-        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_time) * 1000:.2f} ms")
+        logger.info(f"[LMCache] Finished store {len(connector_metadata.requests)} requests with {total_number} tokens in {(end_time - start_store) * 1000:.2f} ms, model forward takes {(start_store - start_time) * 1000:.2f} ms, in total {(end_time - start_time) * 1000:.2f} ms")
         
         # for bucket, buf in acquired_buffers:
         #     self._slotmap_pool.release(bucket, buf)
@@ -913,6 +922,7 @@ class LMCacheConnectorV1Impl:
         if self.kv_role == "kv_producer":
             return 0
 
+        logger.info(f"token len is {len(request.prompt_token_ids)}")
         token_ids = torch.tensor(request.prompt_token_ids)
 
         # If the request has multimodal hashes, apply them to the token ids
@@ -974,9 +984,10 @@ class LMCacheConnectorV1Impl:
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
             req_disagg_spec = kv_transfer_params["disagg_spec"]
 
-            receiver_id = req_disagg_spec["receiver_host"] + str(
-                req_disagg_spec["receiver_init_port"]
-            )
+            # receiver_id = req_disagg_spec["receiver_host"] + str(
+            #     req_disagg_spec["receiver_init_port"]
+            # )
+            receiver_id = req_disagg_spec["receiver_uuid"]
             receiver_info = NixlReceiverInfo(
                 receiver_id=receiver_id,
                 receiver_host=req_disagg_spec["receiver_host"],

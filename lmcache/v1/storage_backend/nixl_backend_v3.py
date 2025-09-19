@@ -93,11 +93,23 @@ class NixlBackend(StorageBackendInterface):
     def memcheck(self):
         self.memory_allocator.memcheck()
 
-    def get_allocated_size(self):
-        return self.memory_allocator.total_allocated_size
+    def get_allocated_size(self) -> tuple[int, int]:
+        gpu_size = 0
+        cpu_size = 0
 
-    def get_cpu_allocated_size(self):
-        return self.memory_allocator.cpu_total_allocated_size
+        try:
+            gpu_size = self.memory_allocator.total_allocated_size
+        except Exception as e:
+            logger.warning(f"Failed to read total_allocated_size: {e}")
+            gpu_size = 0
+
+        try:
+            cpu_size = self.memory_allocator.cpu_total_allocated_size
+        except Exception as e:
+            logger.warning(f"Failed to read cpu_total_allocated_size: {e}")
+            cpu_size = 0
+
+        return gpu_size, cpu_size
 
     def get_max_lifespan(self):
         max_lifespan = 0
@@ -313,17 +325,14 @@ class NixlBackend(StorageBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
+        logger.info(f"sender going to do prepare send for req: {transfer_spec.req_id}")
         try:
-            logger.info("debug: calling prepare_send")
             self._nixl_channel.prepare_send(
                 keys=keys,
                 mem_objs=memory_objs,
                 transfer_spec=transfer_spec,
             )
         except Exception as e:
-            import traceback
-            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            logger.error("failed:\n%s", tb)
             for mem_obj in memory_objs:
                 mem_obj.ref_count_down()
             raise e

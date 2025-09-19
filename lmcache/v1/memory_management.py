@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple, Union
 import abc
 import ctypes
 import threading
+import time
 
 # Third Party
 import sortedcontainers
@@ -330,6 +331,7 @@ class TensorMemoryObj(MemoryObj):
             self.meta.ref_count += 1
 
     def ref_count_down(self):
+        logger.debug(f"ref_count_down called, current ref count is {self.meta.ref_count}, address is {self.meta.address}, is_cuda is {self.is_cuda}")
         with self.lock:
             self.meta.ref_count -= 1
             if (
@@ -337,6 +339,7 @@ class TensorMemoryObj(MemoryObj):
                 and self.parent_allocator is not None
                 and self.meta.is_pin is False
             ):
+                logger.info(f"ref_count is zero, free memory object: {self} at address {self.meta.address}, is_cuda is {self.is_cuda}")
                 self.parent_allocator.free(self)
 
     def get_ref_count(self) -> int:
@@ -878,6 +881,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
         self.align_bytes = num_elements * self.bytes_per_element
 
+        self.buffer_size = (self.buffer_size // self.align_bytes) * self.align_bytes
+        self.buffer = self.buffer[:self.buffer_size]
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
             f" multiple of align bytes {self.align_bytes}"
@@ -921,6 +926,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.cpu_buffer = cpu_buffer.view(torch.uint8).flatten()
         self.cpu_buffer_size = self.cpu_buffer.numel() * self.cpu_buffer.element_size()
         self.cpu_buffer_ptr = self.cpu_buffer.data_ptr()
+        
+        self.cpu_buffer_size = (self.cpu_buffer_size // self.align_bytes) * self.align_bytes
+        self.cpu_buffer = self.cpu_buffer[:self.cpu_buffer_size]
         
         self.cpu_paged_buffers = torch.split(self.cpu_buffer, self.align_bytes, dim=0)
         self.cpu_free_blocks = deque()
@@ -988,8 +996,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # Update debug status
         self.num_active_allocations += 1
         self.cpu_total_allocated_size += self.align_bytes
-        self.total_allocated_size += self.align_bytes
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        # self.total_allocated_size += self.align_bytes
+        # self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 
         # Allocate the block
         logger.info(f"allocate cpu memory, allocate block {free_block.tensor.is_cuda}, free blocks left {len(self.cpu_free_blocks)}")
@@ -1090,7 +1098,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj):
         if not memory_obj.is_valid():
+            logger.info("invalid memobj")
             return
+        logger.info(f"memory_obj.meta.shape is {memory_obj.meta.shape}, self.shape is {self.shape}")
         if memory_obj.meta.shape != self.shape:
             page_idx = memory_obj.meta.address
             if (memory_obj.is_cuda):
@@ -1103,11 +1113,13 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # TODO (Jiayi): need a flag to drop these debug ops
         # Update debug status
         if (memory_obj.is_cuda):
+            logger.info("free cuda memobj")
             self.free_blocks.append(memory_obj)
+            self.total_allocated_size -= self.align_bytes
         else:
             self.cpu_free_blocks.append(memory_obj)
+            logger.info(f"free blocks left {len(self.cpu_free_blocks)}")
             self.cpu_total_allocated_size -= self.align_bytes
-        self.total_allocated_size -= self.align_bytes
         self.num_active_allocations = max(0, self.num_active_allocations - 1)
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
 

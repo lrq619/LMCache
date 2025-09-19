@@ -212,16 +212,26 @@ class LMCacheEngine:
                 transfer_spec = None
                 if "transfer_spec" in kwargs:
                     transfer_spec = kwargs["transfer_spec"]
-                if self._is_same_node(transfer_spec.receiver_info.receiver_host):
-                    memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
-                else:
-                    memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
-                if memory_obj is None:
-                    logger.warning(
-                        "Failed to allocate memory for the KV cache.\n"
-                        "The KV cache will not be stored."
-                    )
-                    break
+                    
+                memory_obj = None
+                retry_interval = 0.1
+                while memory_obj is None:
+                    if self._is_same_node(transfer_spec.receiver_info.receiver_host):
+                        logger.info(f"allocating sender buffer(gpu) for req: {transfer_spec.req_id}, host is {socket.gethostname()}, receiver is {transfer_spec.receiver_info.receiver_host}, allocating cuda memory")
+                        # memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+                        memory_obj = self.storage_manager.allocator_backend.allocate(kv_shape, kv_dtype, fmt=MemoryFormat.KV_2LTD, eviction=True, req_id=transfer_spec.req_id)
+                    else:
+                        logger.info(f"allocating sender buffer(cpu) for req: {transfer_spec.req_id}, host is {socket.gethostname()}, receiver is {transfer_spec.receiver_info.receiver_host}, allocating cpu memory")
+                        # memory_obj = self.storage_manager.allocate_cpu(kv_shape, kv_dtype)
+                        memory_obj = self.storage_manager.allocator_backend.allocate_cpu(kv_shape, kv_dtype, fmt=MemoryFormat.KV_2LTD, eviction=True, req_id=transfer_spec.req_id)
+                    # if memory_obj is None:
+                    #     logger.warning(
+                    #         "Failed to allocate memory for the KV cache. The KV cache will not be stored."
+                    #     )
+                    #     break
+                    if memory_obj is None:
+                        logger.warning("Failed to allocate memory for the KV cache on sender. Retrying...")
+                        time.sleep(retry_interval)
 
                 starts.append(start)
                 ends.append(end)
@@ -240,6 +250,8 @@ class LMCacheEngine:
         t = time.perf_counter()
 
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
+        req_id = transfer_spec.req_id
+        logger.info(f"Finished batched_put for {req_id}")
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -247,9 +259,9 @@ class LMCacheEngine:
         if self.lookup_server is not None:
             self.lookup_server.batched_insert(keys)
 
-        logger.debug(
+        logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms, allocated time: %.4f ms, token_database process time: %.4f ms",
+            "offload_time: %.4f ms, put_time: %.4f ms, allocated time: %.4f ms, token_database process time: %.4f ms, %s",
             num_stored_tokens,
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3,
@@ -257,6 +269,7 @@ class LMCacheEngine:
             put_time * 1000,
             allocate_total_time * 1000,
             process_time * 1000,
+            req_id
         )
 
         self.stats_monitor.on_store_finished(monitor_req_id)
@@ -496,7 +509,7 @@ class LMCacheEngine:
             else:
                 self.storage_manager.batched_unpin([key])
 
-        total_allocated_size = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
+        total_allocated_size, total_allocated_size_cpu = self.storage_manager.storage_backends['NixlBackend'].get_allocated_size()
         max_lifespan = self.storage_manager.storage_backends['NixlBackend'].get_max_lifespan()
         olddest_req_id = self.storage_manager.storage_backends['NixlBackend'].get_olddest_req_id()
         retrieved_tokens = torch.sum(ret_mask)
@@ -504,7 +517,7 @@ class LMCacheEngine:
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens, after retrival, total allocated size: {total_allocated_size/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
+            f"out of total {len(tokens)} tokens, after retrival, total gpu allocated size: {total_allocated_size/(1024**2)} MB, total cpu allocated size: {total_allocated_size_cpu/(1024**2)} MB, max_lifespan: {max_lifespan*1000:.1f} ms, req with olddest lifespan: {olddest_req_id}"
         )
         return ret_mask
 
