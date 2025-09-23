@@ -234,6 +234,54 @@ class NixlBackend(AllocatorBackendInterface):
 
         return mem_obj
 
+    def garbage_collection(
+            self,
+            max_lifespan_sec: float = 2.0
+    ):
+        with self._data_lock:
+            keys_to_delete = []
+            for key, mem_obj in self._data.items():
+                lifespan = time.time() - mem_obj.allocated_ts
+                if lifespan >= max_lifespan_sec:
+                    while mem_obj.meta.ref_count > 0:
+                        mem_obj.ref_count_down()
+                    keys_to_delete.append(key)
+
+            for key in keys_to_delete:
+                self._data.pop(key, None)
+
+    def clear_kv_cache(self, req_id: str) -> int:
+        """Clear all mem objs belonging to req_id from decoder buffer.
+        Returns: number of deleted objects.
+        """
+        deleted = 0
+        with self._data_lock:
+            keys_to_delete = []
+            for key, mem_obj in self._data.items():
+                if not mem_obj:
+                    continue
+                if req_id in mem_obj.req_ids:
+                    # Drop all refs so allocator can reclaim pages
+                    # while mem_obj.meta.ref_count > 0:
+                    mem_obj.ref_count_down()
+                    if mem_obj.meta.ref_count == 0:
+                        keys_to_delete.append(key)
+
+            for key in keys_to_delete:
+                if self._data.pop(key, None) is not None:
+                    deleted += 1
+
+        return deleted
+
+    def delete_by_req_id(self, req_id: str) -> int:
+        """Delete all MemoryObj that belong to req_id; return count."""
+        deleted = self.clear_kv_cache(req_id)
+        if deleted > 0:
+            logger.info(f"[Backend] delete_by_req_id: req_id={req_id}, deleted={deleted}")
+        else:
+            logger.debug(f"[Backend] delete_by_req_id: req_id={req_id}, nothing to delete")
+        return deleted
+
     def batched_allocate(
         self,
         shape: torch.Size,
