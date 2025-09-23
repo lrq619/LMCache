@@ -396,13 +396,13 @@ class NixlSender:
                 peer["pending"][req_id] = ctx
             else:
                 try:
-                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer["sock"]}")
-                    peer["sock"].send_multipart([req_id.encode(), mv], flags=zmq.NOBLOCK, copy=False)
-                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer["sock"]} peer is {peer}")
+                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer['sock']}")
+                    peer['sock'].send_multipart([req_id.encode(), mv], flags=zmq.NOBLOCK, copy=False)
+                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer['sock']} peer is {peer}")
                     peer["pending"][req_id] = ctx
                     peer["inflight"] += 1
                 except zmq.Again as e:
-                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer["sock"]}")
+                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer['sock']}")
                     import traceback
                     tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
                     logger.error("failed:\n%s", tb)
@@ -414,7 +414,7 @@ class NixlSender:
     def _pump_alloc_writable(self, events: dict) -> bool:
         progressed = False
         for rid, peer in self._alloc_peers.items():
-            sock = peer["sock"]
+            sock = peer['sock']
             if sock not in events or not (events[sock] & zmq.POLLOUT):
                 continue
             while peer["outbox"] and peer["inflight"] < _MAX_INFLIGHT_ALLOC_PER_RECV:
@@ -432,7 +432,7 @@ class NixlSender:
     def _pump_alloc_readable(self, events: dict) -> bool:
         progressed = False
         for rid, peer in self._alloc_peers.items():
-            sock = peer["sock"]
+            sock = peer['sock']
             if sock not in events or not (events[sock] & zmq.POLLIN):
                 continue
             while True:
@@ -444,7 +444,7 @@ class NixlSender:
                 req_id = str(req_id.decode())
                 logger.info(f"alloc got-reply req_id={req_id}")
 
-                logger.info(f"pending add: rid={rid}; pending_keys={list(peer["pending"].keys())}, peer is {peer}")
+                logger.info(f"pending add: rid={rid}; pending_keys={list(peer['pending'].keys())}, peer is {peer}")
                 ctx: _TaskCtx = peer["pending"].pop(req_id, None)
                 peer["inflight"] = max(0, peer["inflight"] - 1)
 
@@ -978,14 +978,14 @@ class NixlReceiver:
             buffer_size=self.memory_allocator.nixl_allocator.buffer_size,
             page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
-            backends=nixl_config.backends,
+            mem_type="cuda",
         )
         self._receiver_cpu_nixl_wrapper = NixlAgentWrapper(
             buffer_ptr=self.memory_allocator.nixl_allocator.cpu_buffer_ptr,
             buffer_size=self.memory_allocator.nixl_allocator.cpu_buffer_size,
             page_size=self.memory_allocator.nixl_allocator.align_bytes,
             tp_rank=tp_rank,
-            backends=nixl_config.backends,
+            mem_type="DRAM"
         )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
@@ -1449,6 +1449,7 @@ class NixlAgentWrapper:
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)
 
+        logger.info(f"page size is {page_size / 1024 / 1024} MB")
         # Create xfer handlers
         xfer_desc = []
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):

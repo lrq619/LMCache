@@ -1124,6 +1124,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # NOTE (Jiayi): the following code is not thread-safe but
         # is tolerable as this is only used for debugging purposes.
         # Update debug status
+        logger.info(f"free gpu blocks left: {len(self.free_blocks)}")
         self.num_active_allocations += 1
         self.total_allocated_size += self.align_bytes
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)

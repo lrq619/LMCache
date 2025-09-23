@@ -78,7 +78,7 @@ class CacheEngineKey:
     model_name: str
     world_size: int
     worker_id: int
-    chunk_hash: int
+    chunk_hash: str
     request_configs: Optional[dict] = None
 
     def __post_init__(self):
@@ -171,7 +171,7 @@ class CacheEngineKey:
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4]),
+            parts[4],
             request_configs,
         )
 

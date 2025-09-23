@@ -9,6 +9,7 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
+import hashlib
 
 if TYPE_CHECKING:
     # Third Party
@@ -73,6 +74,8 @@ def get_ip():
     finally:
         s.close()
 
+def short_id(s: str, k: int = 8) -> str:
+    return hashlib.sha1(s.encode()).hexdigest()[:k]
 
 def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
@@ -109,8 +112,14 @@ def get_zmq_rpc_path_lmcache(
         rpc_port,
     )
 
+    engine_short = short_id(engine_id, 8)
+    if isinstance(rpc_port, str):
+        port_short = short_id(rpc_port, 6)  # 取 6 位
+        rpc_port = f"{port_short}{tp_rank}"
+    else:
+        rpc_port = rpc_port + tp_rank
     socket_path = (
-        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_"
+        f"ipc://{base_url}/engine_{engine_short}_service_{service_name}_"
         f"lmcache_rpc_port_{rpc_port}"
     )
 

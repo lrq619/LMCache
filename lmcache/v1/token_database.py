@@ -2,6 +2,8 @@
 # Standard
 from typing import Any, Iterable, List, Optional, Tuple, Union
 import abc
+import array
+import hashlib
 
 # Third Party
 from transformers import AutoTokenizer
@@ -111,7 +113,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     def _make_key_by_hash(
-        self, chunk_hash: int, request_configs: Optional[dict] = None
+        self, chunk_hash: str, request_configs: Optional[dict] = None
     ):
         assert self.metadata is not None
         return CacheEngineKey(
@@ -178,8 +180,20 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.chunk_size = 256
             self.save_unfull_chunk = True
 
-    def _get_init_hash(self) -> int:
-        return NONE_HASH
+    def _get_init_hash(self) -> str:
+        return ""
+
+    def _hash(
+        self,
+        tokens: Union[torch.Tensor, List[int]],
+        prefix_hash: str,
+    ) -> str:
+        # TODO: change it to a more efficient hash function
+        if isinstance(tokens, torch.Tensor):
+            tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
+        elif isinstance(tokens, list):
+            tokens_bytes = array.array("I", tokens).tobytes()
+        return hashlib.sha256(prefix_hash.encode("ascii") + tokens_bytes).hexdigest()
 
     def _chunk_tokens(
         self,
@@ -205,10 +219,10 @@ class ChunkedTokenDatabase(TokenDatabase):
     def _prefix_hash(
         self,
         token_chunks: Iterable[Union[torch.Tensor, List[int]]],
-    ) -> Iterable[int]:
+    ) -> Iterable[str]:
         prefix_hash = self._get_init_hash()
         for token_chunk in token_chunks:
-            prefix_hash = self._hash_tokens(token_chunk, prefix_hash)
+            prefix_hash = self._hash(token_chunk, prefix_hash)
             yield prefix_hash
 
     @_lmcache_nvtx_annotate
@@ -263,7 +277,7 @@ class ChunkedTokenDatabase(TokenDatabase):
             token_chunks = self._chunk_tokens(tokens)
             prefix_hashes = self._prefix_hash(token_chunks)
             for chunk_id, hash_val in enumerate(prefix_hashes):
-                logger.info(f"prefix_hashes for chunk {chunk_id} is {hash_val} for tokens {tokens}")
+                logger.info(f"prefix_hashes for chunk {chunk_id} is {hash_val} for tokens {len(tokens)}")
                 start_idx = chunk_id * self.chunk_size
                 end_idx = min(start_idx + self.chunk_size, total_len)
                 if start_idx < num_falses:
