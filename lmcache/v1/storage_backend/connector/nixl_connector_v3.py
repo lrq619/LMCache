@@ -196,6 +196,8 @@ class _TaskCtx:
     local_indexes: Optional[List[int]] = None
     remote_indexes: Optional[List[int]] = None
     start_ts_ms: Optional[float] = None
+    start_ac_ms: Optional[float] = None
+    end_ac_ms: Optional[float] = None
 
 class NixlSender:
     """Handles sending data through a NixlPipe."""
@@ -215,7 +217,7 @@ class NixlSender:
         self._dst_device_str = str(nixl_config.buffer_device)
 
         self.nixl_config = nixl_config
-
+        self._backend = backend
         self.memory_allocator = backend.memory_allocator
 
         self._sender_nixl_wrapper = NixlAgentWrapper(
@@ -288,6 +290,37 @@ class NixlSender:
 
         # receiver -> alloc endpoint（用于异步 DEALER；同步通道继续用 _mem_alloc_sockets）
         self._alloc_endpoint_of: dict[str, str] = {}
+        self.mem_obj_map = {}
+        self.mem_obj_map_lock = threading.Lock()
+        self._stat_thread = threading.Thread(target=self._stat_loop, name="nixl-sender-stat-loop", daemon=True)
+        self._stat_thread.start()
+
+    def _stat_loop(self):
+        while self._running:
+            try:
+                total_allocated_size, total_allocated_size_cpu = self._backend.get_allocated_size()
+                instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
+                max_lifespan = 0
+                oldest_req_id = ""
+                now = time.time()
+                with self.mem_obj_map_lock:
+                    for req_id, mem_objs in self.mem_obj_map.items():
+                        mem_obj = mem_objs[0]
+                        lifespan = now - mem_obj.allocated_ts 
+                        if lifespan > max_lifespan:
+                            max_lifespan = lifespan
+                            oldest_req_id = req_id
+
+                logger.info(
+                    f"[SenderStat], uuid:{instance_uuid}, tp_rank: {self.tp_rank}, "
+                    f"total gpu allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
+                    f"total cpu allocated size: {total_allocated_size_cpu / (1024*1024):.2f} MB, "
+                    f"max lifespan: {max_lifespan * 1000:.1f}ms, "
+                    f"req_id with max lifespan: {oldest_req_id}, "
+                )
+            except Exception as e:
+                logger.exception(f"[Sender] Exception in stat loop: {e}")
+            time.sleep(1)
 
     def _start_io_thread(self):
         self._io_thr = threading.Thread(target=self._io_loop, name="nixl-async-io", daemon=True)
@@ -399,6 +432,7 @@ class NixlSender:
                     logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer['sock']}")
                     peer['sock'].send_multipart([req_id.encode(), mv], flags=zmq.NOBLOCK, copy=False)
                     logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer['sock']} peer is {peer}")
+                    ctx.start_ac_ms = time.time() * 1000
                     peer["pending"][req_id] = ctx
                     peer["inflight"] += 1
                 except zmq.Again as e:
@@ -447,6 +481,8 @@ class NixlSender:
                 logger.info(f"pending add: rid={rid}; pending_keys={list(peer['pending'].keys())}, peer is {peer}")
                 ctx: _TaskCtx = peer["pending"].pop(req_id, None)
                 peer["inflight"] = max(0, peer["inflight"] - 1)
+                ctx.end_ac_ms = time.time() * 1000
+                logger.info(f"alloc DONE for req_id={ctx.req_id}, duration: {ctx.end_ac_ms - ctx.start_ac_ms} ms")
 
                 if ctx is None:
                     logger.warning("alloc reply for unknown req_id=%s", req_id)
@@ -498,7 +534,11 @@ class NixlSender:
         ctx.start_ts_ms = time.time() * 1000 
         with nvtx.annotate("launch transfer", color="yellow"):
             transfer_start = time.perf_counter()
-            agent.transfer(handle)
+            try:
+                agent.transfer(handle)
+            except Exception as e:
+                logger.error(f"Transfer failed for handle={handle}: {e}")
+                raise e
             transfer_end = time.perf_counter()
             logger.info(f"transfer call takes: {transfer_end-transfer_start}")
 
@@ -519,7 +559,7 @@ class NixlSender:
         if not self._inflight_xfers:
             return progressed
 
-        for handle in list(self._inflight_xfers.keys())[:_POLL_CHECK_HANDLES_PER_TICK]:
+        for handle in list(self._inflight_xfers.keys()):
             agent, ctx, mem_objs = self._inflight_xfers.get(handle, (None, None, None))
             if agent is None:
                 continue
@@ -550,6 +590,10 @@ class NixlSender:
         req_id = ctx.req_id
         task = ctx.task
 
+        with self.mem_obj_map_lock:
+            assert req_id in self.mem_obj_map, f"req {req_id} not in self.mem_obj_map"
+            del self.mem_obj_map[req_id]
+        logger.info(f"req {req_id} finished transfer without any error")
         # last prefill -> 立即通知 & 取消 2s 错误定时器
         if task.transfer_spec.is_last_prefill:
             self._send_notify_msg(req_id)
@@ -568,7 +612,11 @@ class NixlSender:
             pass
 
     def _fail_ctx(self, ctx: _TaskCtx, err: Exception):
+        logger.error(f"req_id={ctx.req_id} failed with error: {err}", exc_info=True)
         req_id = ctx.req_id
+        with self.mem_obj_map_lock:
+            assert req_id in self.mem_obj_map, f"req {req_id} not in self.mem_obj_map"
+            del self.mem_obj_map[req_id]
         try:
             self._send_error_msg(req_id)
         except Exception:
@@ -620,6 +668,9 @@ class NixlSender:
         rid = sender_task.receiver_info.receiver_id
         logger.debug("prepare_send_async: enqueue req=%s -> receiver=%s (%d objs)",
                      req_id, rid, len(keys))
+
+        with self.mem_obj_map_lock:
+            self.mem_obj_map[req_id] = mem_objs
 
         fut = Future()
 
@@ -690,7 +741,7 @@ class NixlSender:
             mem_objs=mem_objs,
         )
 
-        logger.debug(
+        logger.info(
             "Preparing to send %s objs with request ID: %s to receiver: %s",
             len(sender_task.keys),
             sender_task.req_id,
@@ -971,6 +1022,7 @@ class NixlReceiver:
 
         self._backend = backend
         self.memory_allocator = backend.memory_allocator
+        self.tp_rank = tp_rank
 
         self.device = nixl_config.buffer_device
         self._receiver_nixl_wrapper = NixlAgentWrapper(
@@ -1071,7 +1123,7 @@ class NixlReceiver:
                 valid_obj_num = self._backend.get_num_valid_mem_obj()
                 instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
                 logger.info(
-                    f"[ReceiverStat], uuid:{instance_uuid}, "
+                    f"[ReceiverStat], uuid:{instance_uuid}, tp_rank: {self.tp_rank}, "
                     f"total gpu allocated size: {total_allocated_size / (1024*1024):.2f} MB, "
                     f"total cpu allocated size: {total_allocated_size_cpu / (1024*1024):.2f} MB, "
                     f"max lifespan: {max_lifespan * 1000:.1f}ms, "
@@ -1219,8 +1271,8 @@ class NixlReceiver:
                 alloc_resp = self._allocate_and_put(alloc_req)
 
                 logger.debug(
-                    "Replying allocation response for %s objs",
-                    len(alloc_resp.remote_indexes),
+                    "Replying allocation response for %s objs for %s req",
+                    len(alloc_resp.remote_indexes), alloc_req.req_id
                 )
 
                 # send back response

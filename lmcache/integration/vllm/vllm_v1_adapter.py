@@ -1094,9 +1094,15 @@ class LMCacheConnectorV1Impl:
         if kv_transfer_params is not None and "disagg_spec" in kv_transfer_params:
             req_disagg_spec = kv_transfer_params["disagg_spec"]
 
-            receiver_id = req_disagg_spec["receiver_host"] + str(
-                req_disagg_spec["receiver_init_port"]
+            # receiver_id = req_disagg_spec["receiver_host"] + str(
+            #     req_disagg_spec["receiver_init_port"]
+            # )
+            from vllm.distributed.parallel_state import (
+                get_tensor_model_parallel_rank,
             )
+
+            tp_rank = get_tensor_model_parallel_rank()
+            receiver_id = req_disagg_spec['receiver_uuid'] + f"::{tp_rank}"
             receiver_info = NixlReceiverInfo(
                 receiver_id=receiver_id,
                 receiver_host=req_disagg_spec["receiver_host"],
