@@ -1097,12 +1097,12 @@ class LMCacheConnectorV1Impl:
             # receiver_id = req_disagg_spec["receiver_host"] + str(
             #     req_disagg_spec["receiver_init_port"]
             # )
-            from vllm.distributed.parallel_state import (
-                get_tensor_model_parallel_rank,
-            )
+            # from vllm.distributed.parallel_state import (
+            #     get_tensor_model_parallel_rank,
+            # )
 
-            tp_rank = get_tensor_model_parallel_rank()
-            receiver_id = req_disagg_spec['receiver_uuid'] + f"::{tp_rank}"
+            # tp_rank = get_tensor_model_parallel_rank()
+            receiver_id = req_disagg_spec['receiver_uuid']
             receiver_info = NixlReceiverInfo(
                 receiver_id=receiver_id,
                 receiver_host=req_disagg_spec["receiver_host"],

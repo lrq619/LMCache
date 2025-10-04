@@ -1155,7 +1155,7 @@ class NixlReceiver:
                 with self.deleted_reqs_lock:
                     self.deleted_reqs_set.add(delete_req.req_id)
                 self._delete_side_channel.send(msgspec.msgpack.encode(
-                    NixlAllocResponse(remote_indexes=[])))
+                    NixlAllocResponse(already_sent_indexes=[], remote_indexes=[])))
                 logger.info(
                     "Received delete request for %s, deleted: %s",
                     delete_req.req_id,
