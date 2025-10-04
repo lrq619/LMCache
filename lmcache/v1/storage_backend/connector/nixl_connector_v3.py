@@ -396,7 +396,6 @@ class NixlSender:
         for _ in range(64):  # 每 tick 吸一小撮，避免长时间占用循环
             try:
                 task = self._send_q.get_nowait()
-                logger.info(f"task is {task}")
             except Exception:
                 break
 
@@ -429,14 +428,14 @@ class NixlSender:
                 peer["pending"][req_id] = ctx
             else:
                 try:
-                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer['sock']}")
+                    logger.info(f"alloc try-send NOW req={req_id} rid={rid} sock={peer['sock']} on tp_rank: {self.tp_rank}")
                     peer['sock'].send_multipart([req_id.encode(), mv], flags=zmq.NOBLOCK, copy=False)
-                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer['sock']} peer is {peer}")
+                    logger.info(f"alloc sent NOW req={req_id} rid={rid} sock={peer['sock']} peer is {peer} on tp_rank: {self.tp_rank}")
                     ctx.start_ac_ms = time.time() * 1000
                     peer["pending"][req_id] = ctx
                     peer["inflight"] += 1
                 except zmq.Again as e:
-                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer['sock']}")
+                    logger.info(f"alloc send WOULD-BLOCK req={req_id} rid={rid} sock={peer['sock']} on tp_rank: {self.tp_rank}")
                     import traceback
                     tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
                     logger.error("failed:\n%s", tb)
@@ -476,13 +475,13 @@ class NixlSender:
                     break
 
                 req_id = str(req_id.decode())
-                logger.info(f"alloc got-reply req_id={req_id}")
+                logger.info(f"alloc got-reply req_id={req_id} on tp_rank: {self.tp_rank}")
 
-                logger.info(f"pending add: rid={rid}; pending_keys={list(peer['pending'].keys())}, peer is {peer}")
+                # logger.info(f"pending add: rid={rid}; pending_keys={list(peer['pending'].keys())}, peer is {peer}")
                 ctx: _TaskCtx = peer["pending"].pop(req_id, None)
                 peer["inflight"] = max(0, peer["inflight"] - 1)
                 ctx.end_ac_ms = time.time() * 1000
-                logger.info(f"alloc DONE for req_id={ctx.req_id}, duration: {ctx.end_ac_ms - ctx.start_ac_ms} ms")
+                logger.info(f"alloc DONE for req_id={ctx.req_id}, duration: {ctx.end_ac_ms - ctx.start_ac_ms} ms on tp_rank: {self.tp_rank}")
 
                 if ctx is None:
                     logger.warning("alloc reply for unknown req_id=%s", req_id)
@@ -540,7 +539,7 @@ class NixlSender:
                 logger.error(f"Transfer failed for handle={handle}: {e}")
                 raise e
             transfer_end = time.perf_counter()
-            logger.info(f"transfer call takes: {transfer_end-transfer_start}")
+            logger.info(f"transfer call takes: {transfer_end-transfer_start} on tp_rank: {self.tp_rank}")
 
         # 控制全局在途上限（可选：如超过则下个 tick 再检查）
         if len(self._inflight_xfers) >= _MAX_INFLIGHT_XFER_GLOBAL:
@@ -551,7 +550,7 @@ class NixlSender:
         self._inflight_xfers[handle] = (agent, ctx, mem_objs)
         
         end = time.perf_counter()
-        logger.info(f"_submit_send_nb call takes: {transfer_end-transfer_start}")
+        logger.info(f"_submit_send_nb call takes: {transfer_end-transfer_start} on tp_rank: {self.tp_rank}")
         
     @_lmcache_nvtx_annotate
     def _poll_transfers(self) -> bool:
@@ -579,7 +578,7 @@ class NixlSender:
 
             if st == "DONE":
                 ctx.end_ts_ms = time.time() * 1000
-                logger.info(f"transfer DONE for req_id={ctx.req_id}, duration: {ctx.end_ts_ms - ctx.start_ts_ms} ms")
+                logger.info(f"transfer DONE for req_id={ctx.req_id}, duration: {ctx.end_ts_ms - ctx.start_ts_ms} ms on tp_rank: {self.tp_rank}")
                 self._finish_ctx_ok(ctx)
             else:
                 self._fail_ctx(ctx, RuntimeError(f"send error, status={st}"))
@@ -593,7 +592,7 @@ class NixlSender:
         with self.mem_obj_map_lock:
             assert req_id in self.mem_obj_map, f"req {req_id} not in self.mem_obj_map"
             del self.mem_obj_map[req_id]
-        logger.info(f"req {req_id} finished transfer without any error")
+        logger.info(f"req {req_id} finished transfer without any error on tp_rank: {self.tp_rank}")
         # last prefill -> 立即通知 & 取消 2s 错误定时器
         if task.transfer_spec.is_last_prefill:
             self._send_notify_msg(req_id)
@@ -707,7 +706,7 @@ class NixlSender:
                 return
             else:
                 self.notified_req_set.add(req_id)
-        logger.info(f"Notified kv ready for req: {req_id}")
+        logger.info(f"Notified kv ready for req: {req_id} on tp_rank: {self.tp_rank}")
         notif_msg = NixlProxyNotif(req_id=req_id)
         notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
         self._proxy_side_channel.send(notif_msg_bytes)
@@ -742,10 +741,11 @@ class NixlSender:
         )
 
         logger.info(
-            "Preparing to send %s objs with request ID: %s to receiver: %s",
+            "Preparing to send %s objs with request ID: %s to receiver: %s on tp_rank: %d",
             len(sender_task.keys),
             sender_task.req_id,
             receiver_info,
+            self.tp_rank
         )
 
         # self.req_queue.put(sender_task)
@@ -1157,8 +1157,9 @@ class NixlReceiver:
                 self._delete_side_channel.send(msgspec.msgpack.encode(
                     NixlAllocResponse(already_sent_indexes=[], remote_indexes=[])))
                 logger.info(
-                    "Received delete request for %s, deleted: %s",
+                    "Received delete request for %s on tp_rank %d, deleted: %s",
                     delete_req.req_id,
+                    self.tp_rank,
                     deleted,
                 )   
             except zmq.Again as e:  # type: ignore
@@ -1184,9 +1185,9 @@ class NixlReceiver:
         keys = []
         mem_objs = []
         for idx, key_str in enumerate(alloc_request.keys):
-            logger.info(f"receive key_str is {key_str}")
+            # logger.info(f"receive key_str is {key_str}")
             key = CacheEngineKey.from_string(key_str)
-            logger.info(f"receive key is {key}")
+            # logger.info(f"receive key is {key}")
 
             if idx == total_allocs - 1:
                 num_alloc_tokens = alloc_request.last_chunk_toks
@@ -1203,7 +1204,7 @@ class NixlReceiver:
                 # check if delete signal has been issued, if so, break the loop
                 with self.deleted_reqs_lock:
                     if req_id in self.deleted_reqs_set:
-                        logger.info(f"req: {req_id} already deleted by delete thread, stop trying to allocate")
+                        logger.info(f"req: {req_id} already deleted by delete thread on tp_rank: {self.tp_rank}, stop trying to allocate")
                         break
                     
                 if alloc_request.is_cuda:
@@ -1233,7 +1234,7 @@ class NixlReceiver:
             self._backend.put(key, mem_obj)
             
         if len(keys) > 0: 
-            logger.info(f"put {len(keys)} mem_objs for req: {mem_objs[0].req_ids}")
+            logger.info(f"put {len(keys)} mem_objs for req: {mem_objs[0].req_ids} for tp_rank: {self.tp_rank}")
 
         return NixlAllocResponse(
             already_sent_indexes=[], remote_indexes=alloc_indexes

@@ -1053,9 +1053,15 @@ class LMCacheConnectorV1Impl:
         if num_external_hit_tokens == request.num_tokens:
             need_to_allocate -= 1
 
+        if request.kv_transfer_params is not None:
+            role = "prefill"
+        else:
+            role = "decode"
+
         logger.info(
-            "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
+            "Reqid: %s, role: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
             request.request_id,
+            role,
             request.num_tokens,
             num_external_hit_tokens,
             need_to_allocate,

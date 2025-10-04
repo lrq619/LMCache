@@ -338,6 +338,7 @@ class NixlBackend(AllocatorBackendInterface):
             # because we are using a push-based transfer
             mem_obj = self._data.get(key, None)
             assert mem_obj is not None, f"Key {key} not found in local data."
+            self.get_count += 1
 
             # NOTE(Jiayi): Currently, we remove the cache from local storage
             # buffer (on decode node) after it is retrieved.
