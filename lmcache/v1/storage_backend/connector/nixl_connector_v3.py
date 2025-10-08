@@ -878,7 +878,8 @@ class NixlSender:
     def _is_same_node(self, receiver_host: str) -> bool:
         host_name = socket.gethostname()
         logger.debug(f"host_name is {host_name}")
-        return receiver_host == host_name
+        # return receiver_host == host_name
+        return False
 
 
     def _initialize_nixl_sender_connection(
