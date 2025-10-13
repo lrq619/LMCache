@@ -276,7 +276,7 @@ class NixlSender:
         self._io_thr: Optional[threading.Thread] = None
         self._stop = False
 
-        self._zmq_ctx = zmq.Context.instance()
+        self._zmq_ctx = zmq.Context()
         self._poller = zmq.Poller()
 
         self._alloc_peers: dict[str, dict] = {}
