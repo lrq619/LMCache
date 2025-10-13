@@ -182,7 +182,9 @@ class LMCacheEngine:
             
     def _is_same_node(self, receiver_host: str) -> bool:
         host_name = socket.gethostname()
-        return receiver_host == host_name
+        # only use cpu buffer, always return false
+        # return receiver_host == host_name
+        return False
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -1259,8 +1261,9 @@ class LMCacheEngineBuilder:
                 torch.cuda.set_device(corrected_device)
 
                 # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
+                gpu_buffer_size = 1024 # only create a very small gpu buffer
                 buffer = torch.empty(
-                    config.nixl_buffer_size,
+                    gpu_buffer_size,
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
