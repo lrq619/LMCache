@@ -483,7 +483,10 @@ class LMCacheEngine:
             reordered_keys.extend(keys)
             reordered_starts.extend(start_mapping[location])
             reordered_ends.extend(end_mapping[location])
-        logger.info(f"Retrieving {len(reordered_keys)} keys from storage backends: {list(key_mapping.keys())}")
+        if memory_objs:
+            logger.info(f"Retrieving {len(reordered_keys)} keys from storage backends: {list(key_mapping.keys())}, req_id: {memory_objs[0].req_ids}")
+        else:
+            logger.info(f"Retrieving {len(reordered_keys)} keys from storage backends: {list(key_mapping.keys())}")
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.

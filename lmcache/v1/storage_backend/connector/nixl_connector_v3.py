@@ -205,6 +205,8 @@ class NixlSender:
         config: LMCacheEngineConfig,
         backend: StorageBackendInterface,
     ):
+        instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
+        self.instance_uuid = instance_uuid
         assert nixl_config.role == NixlRole.SENDER, (
             "NixlSender should only be initialized with NixlRole.SENDER"
         )
@@ -276,7 +278,8 @@ class NixlSender:
         self._io_thr: Optional[threading.Thread] = None
         self._stop = False
 
-        self._zmq_ctx = zmq.Context.instance()
+        # self._zmq_ctx = zmq.Context.instance()
+        self._zmq_ctx = zmq.Context()
         self._poller = zmq.Poller()
 
         self._alloc_peers: dict[str, dict] = {}
@@ -297,10 +300,10 @@ class NixlSender:
         self._stat_thread.start()
 
     def _stat_loop(self):
+        instance_uuid = self.instance_uuid
         while self._running:
             try:
                 total_allocated_size, total_allocated_size_cpu = self._backend.get_allocated_size()
-                instance_uuid = os.environ.get("INSTANCE_UUID", "unkown")
                 max_lifespan = 0
                 oldest_req_id = ""
                 now = time.time()
@@ -370,7 +373,7 @@ class NixlSender:
         # sock.setsockopt(zmq.IMMEDIATE, 1)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.SNDHWM, 0)
-        logger.info(f"connecting alloc DEALER socket to {endpoint} for receiver {receiver_id}")
+        logger.info(f"[Sender {self.instance_uuid}] connecting alloc DEALER socket to {endpoint} for receiver {receiver_id}")
         sock.connect(endpoint)
         self._poller.register(sock, zmq.POLLIN | zmq.POLLOUT)
         peer = dict(sock=sock, outbox=deque(), pending={}, inflight=0)
@@ -389,6 +392,8 @@ class NixlSender:
             # 超时也行：后续 send(NOBLOCK) 可能会 Again，由 outbox 兜底
             logger.warning(f"timeout waiting for connect to {endpoint} for receiver {receiver_id}")
             pass
+
+        logger.info(f"[Sender {self.instance_uuid}] connected to receiver {receiver_id}({connected})")
         
         return peer
     
@@ -706,6 +711,7 @@ class NixlSender:
         notif_msg = NixlProxyNotif(req_id=req_id)
         notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
         self._proxy_side_channel.send(notif_msg_bytes)
+        logger.info(f"kv ready for req: {req_id} notification sent!")
 
     def prepare_send(
         self,
