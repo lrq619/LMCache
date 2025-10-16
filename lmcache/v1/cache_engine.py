@@ -1261,7 +1261,7 @@ class LMCacheEngineBuilder:
                 torch.cuda.set_device(corrected_device)
 
                 # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
-                gpu_buffer_size = 1024 # only create a very small gpu buffer
+                gpu_buffer_size = 1024*1024*1024 # only create a very small gpu buffer
                 buffer = torch.empty(
                     gpu_buffer_size,
                     dtype=torch.uint8,
