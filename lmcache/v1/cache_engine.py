@@ -1284,7 +1284,7 @@ class LMCacheEngineBuilder:
                         config.nixl_buffer_size,
                         dtype=torch.uint8,
                         device="cpu",
-                        pin_memory=True,
+                        pin_memory=False,
                     )
                 except RuntimeError as e:
                     logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
