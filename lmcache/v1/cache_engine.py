@@ -1261,7 +1261,7 @@ class LMCacheEngineBuilder:
                 torch.cuda.set_device(corrected_device)
 
                 # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
-                gpu_buffer_size = 1024*1024*1024 # only create a very small gpu buffer
+                gpu_buffer_size = 32*1024*1024 # only create a very small gpu buffer
                 buffer = torch.empty(
                     gpu_buffer_size,
                     dtype=torch.uint8,
@@ -1280,12 +1280,16 @@ class LMCacheEngineBuilder:
                 #         int(max_local_cpu_size * 1024**3)
                 #     )
                 try:
+                    import time
+                    start = time.time()
                     cpu_buffer = torch.empty(
                         config.nixl_buffer_size,
                         dtype=torch.uint8,
                         device="cpu",
                         pin_memory=False,
                     )
+                    torch.cuda.synchronize()
+                    logger.info(f"allocating CPU pageble buffer takes {time.time() - start:.3f}s")
                 except RuntimeError as e:
                     logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
                     cpu_buffer = torch.empty(
