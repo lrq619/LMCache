@@ -37,6 +37,7 @@ from typing import Optional, List, Tuple
 from concurrent.futures import Future
 import os
 import nvtx
+import lmcache.v1.nixl_agent_pool as nixl_agent_pool
 
 if TYPE_CHECKING:
     # Third Party
@@ -227,13 +228,15 @@ class NixlSender:
             tp_rank=tp_rank,
             mem_type="cuda"
         )
-        self._sender_cpu_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.nixl_allocator.cpu_buffer_ptr,
-            buffer_size=self.memory_allocator.nixl_allocator.cpu_buffer_size,
-            page_size=self.memory_allocator.nixl_allocator.align_bytes,
-            tp_rank=tp_rank,
-            mem_type="DRAM"
-        )
+
+        self._sender_cpu_nixl_wrapper = get_nixl_agent_wrapper(self.tp_rank)
+        # self._sender_cpu_nixl_wrapper = NixlAgentWrapper(
+        #     buffer_ptr=self.memory_allocator.nixl_allocator.cpu_buffer_ptr,
+        #     buffer_size=self.memory_allocator.nixl_allocator.cpu_buffer_size,
+        #     page_size=self.memory_allocator.nixl_allocator.align_bytes,
+        #     tp_rank=tp_rank,
+        #     mem_type="DRAM"
+        # )
         
         self._nixl_agent = self._sender_nixl_wrapper.agent
         self._nixl_cpu_agent = self._sender_cpu_nixl_wrapper.agent
@@ -1033,13 +1036,14 @@ class NixlReceiver:
             tp_rank=tp_rank,
             mem_type="cuda",
         )
-        self._receiver_cpu_nixl_wrapper = NixlAgentWrapper(
-            buffer_ptr=self.memory_allocator.nixl_allocator.cpu_buffer_ptr,
-            buffer_size=self.memory_allocator.nixl_allocator.cpu_buffer_size,
-            page_size=self.memory_allocator.nixl_allocator.align_bytes,
-            tp_rank=tp_rank,
-            mem_type="DRAM"
-        )
+        self._receiver_cpu_nixl_wrapper = get_nixl_agent_wrapper(self.tp_rank)
+        # self._receiver_cpu_nixl_wrapper = NixlAgentWrapper(
+        #     buffer_ptr=self.memory_allocator.nixl_allocator.cpu_buffer_ptr,
+        #     buffer_size=self.memory_allocator.nixl_allocator.cpu_buffer_size,
+        #     page_size=self.memory_allocator.nixl_allocator.align_bytes,
+        #     tp_rank=tp_rank,
+        #     mem_type="DRAM"
+        # )
 
         self._nixl_agent = self._receiver_nixl_wrapper.agent
         self._nixl_cpu_agent = self._receiver_cpu_nixl_wrapper.agent
@@ -1446,7 +1450,6 @@ def get_zmq_path(url: str, protocol: str = "tcp") -> str:
         return f"tcp://{url}"
     raise ValueError(f"Unsupported protocol: {protocol}")
 
-
 @dataclass
 class NixlAgentWrapper:
     agent: "NixlAgent"
@@ -1528,3 +1531,18 @@ class NixlAgentWrapper:
         if remote_xfer_handlers is not None:
             for remote_xfer_handler in remote_xfer_handlers.values():
                 self.agent.release_dlist_handle(remote_xfer_handler)
+
+def get_nixl_agent_wrapper(
+    tp_rank: int,
+):
+    mem_type = "DRAM"
+    abs_rank = nixl_agent_pool.get_abs_rank(tp_rank)
+    nixl_agent,reg_descs, xfer_descs, xfer_handler  = nixl_agent_pool.get_nixl_agent(abs_rank)
+    wrapper = object.__new__(NixlAgentWrapper)
+    wrapper.agent = agent_instance
+    wrapper.reg_descs = reg_descs
+    wrapper.xfer_descs = xfer_descs
+    wrapper.xfer_handler = xfer_handler
+    logger.info(f"Gets pre-init nixl receiver agent on gpu abs rank: {abs_rank}")
+    return wrapper
+

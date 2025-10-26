@@ -55,7 +55,7 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
-
+import lmcache.v1.nixl_agent_pool as nixl_agent_pool
 import socket
 
 logger = init_logger(__name__)
@@ -1267,7 +1267,7 @@ class LMCacheEngineBuilder:
                     dtype=torch.uint8,
                     device=corrected_device,
                 )
-                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
+                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator() 
                 nixl_cpu_mem_allocator.init_nixl_memory_allocator(
                     buffer,
                     torch.Size(metadata.kv_shape),
@@ -1282,14 +1282,16 @@ class LMCacheEngineBuilder:
                 try:
                     import time
                     start = time.time()
-                    cpu_buffer = torch.empty(
-                        config.nixl_buffer_size,
-                        dtype=torch.uint8,
-                        device="cpu",
-                        pin_memory=False,
-                    )
-                    torch.cuda.synchronize()
-                    logger.info(f"allocating CPU pageble buffer takes {time.time() - start:.3f}s")
+                    abs_rank = nixl_agent_pool.get_abs_rank(metadata.worker_id)
+                    cpu_buffer = nixl_agent_pool.get_cpu_buffer(abs_rank)
+                    # cpu_buffer = torch.empty(
+                    #     config.nixl_buffer_size,
+                    #     dtype=torch.uint8,
+                    #     device="cpu",
+                    #     pin_memory=False,
+                    # )
+                    # torch.cuda.synchronize()
+                    # logger.info(f"allocating CPU pageble buffer takes {time.time() - start:.3f}s")
                 except RuntimeError as e:
                     logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
                     cpu_buffer = torch.empty(
