@@ -164,53 +164,56 @@ def init_nixl_maps(num_gpus: int, model_path: str):
     num_layer = data_json['num_layer']
 
     for i in range(num_gpus):
-        buffer = torch.empty(
-            nixl_buffer_size,
-            dtype=torch.uint8,
-            device="cpu",
-            pin_memory=False,
-        )
-        mem_type = "DRAM"
-        cpu_buffer = buffer.view(torch.uint8).flatten()
+        # buffer = torch.empty(
+        #     nixl_buffer_size,
+        #     dtype=torch.uint8,
+        #     device="cpu",
+        #     pin_memory=False,
+        # )
+        # print(f"before send to share memory")
+        # buffer = buffer.share_memory_()
+        # print(f"after send to share memory")
+        # mem_type = "DRAM"
+        # cpu_buffer = buffer.view(torch.uint8).flatten()
         
-        buffer_size = cpu_buffer.numel() * cpu_buffer.element_size()
-        buffer_ptr = cpu_buffer.data_ptr()
+        # buffer_size = cpu_buffer.numel() * cpu_buffer.element_size()
+        # buffer_ptr = cpu_buffer.data_ptr()
 
 
-        kv_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-        chunk_size = 256
-        kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-        shape = torch.Size(kv_shape)
+        # kv_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+        # chunk_size = 256
+        # kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+        # shape = torch.Size(kv_shape)
 
-        num_elements = shape.numel()
-        bytes_per_element = torch.tensor([], dtype=kv_dtype).element_size()
-        align_bytes = num_elements * bytes_per_element
+        # num_elements = shape.numel()
+        # bytes_per_element = torch.tensor([], dtype=kv_dtype).element_size()
+        # align_bytes = num_elements * bytes_per_element
 
-        buffer_size = (buffer_size // align_bytes) * align_bytes
-        cpu_buffer = buffer[:buffer_size]
+        # buffer_size = (buffer_size // align_bytes) * align_bytes
+        # cpu_buffer = cpu_buffer[:buffer_size]
 
         agent = nixl_agent(str(uuid.uuid4()), None)
 
-        # # Register the memory
-        memory_desc = [(buffer_ptr, buffer_size, i, "")]
-        # TODO(Jiayi): remove hardcode `mem_type`
-        reg_descs = agent.get_reg_descs(memory_desc, mem_type=mem_type)
-        agent.register_memory(reg_descs)
+        # # # Register the memory
+        # memory_desc = [(buffer_ptr, buffer_size, i, "")]
+        # # TODO(Jiayi): remove hardcode `mem_type`
+        # reg_descs = agent.get_reg_descs(memory_desc, mem_type=mem_type)
+        # agent.register_memory(reg_descs)
 
-        # # Create xfer handlers
-        page_size = align_bytes
-        xfer_desc = []
-        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            xfer_desc.append((base_addr, page_size, i))
+        # # # Create xfer handlers
+        # page_size = align_bytes
+        # xfer_desc = []
+        # for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
+        #     xfer_desc.append((base_addr, page_size, i))
 
-        xfer_descs = agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
-        xfer_handler = agent.prep_xfer_dlist("", xfer_descs, mem_type=mem_type)
+        # xfer_descs = agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
+        # xfer_handler = agent.prep_xfer_dlist("", xfer_descs, mem_type=mem_type)
 
-        cpu_buffer_map[i]= cpu_buffer
+        # cpu_buffer_map[i]= cpu_buffer
         nixl_agent_map[i] = agent
-        reg_descs_map[i] = reg_descs
-        xfer_descs_map[i] = xfer_descs
-        xfer_handler_map[i] = xfer_handler
+        # reg_descs_map[i] = reg_descs
+        # xfer_descs_map[i] = xfer_descs
+        # xfer_handler_map[i] = xfer_handler
 
 
 def get_abs_rank(tp_rank: int) -> int:
@@ -242,4 +245,4 @@ def get_cpu_buffer(abs_rank: int):
 
 def get_nixl_agent(abs_rank: int):
     assert abs_rank in nixl_agent_map, f"nixl_agent_map doesn't have rank {abs_rank}'s nixl agent"
-    return nixl_agent_map[abs_rank], reg_descs_map[abs_rank], xfer_descs_map[abs_rank], xfer_handler_map[abs_rank]
+    return nixl_agent_map[abs_rank]

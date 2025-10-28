@@ -58,6 +58,10 @@ from lmcache.v1.token_database import (
 import lmcache.v1.nixl_agent_pool as nixl_agent_pool
 import socket
 
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+)
+
 logger = init_logger(__name__)
 
 
@@ -1265,8 +1269,8 @@ class LMCacheEngineBuilder:
                 buffer = torch.empty(
                     gpu_buffer_size,
                     dtype=torch.uint8,
-                    device=corrected_device,
-                )
+                    device="cpu",
+                ) # TODO: delete this buffer
                 nixl_cpu_mem_allocator = NixlCPUMemoryAllocator() 
                 nixl_cpu_mem_allocator.init_nixl_memory_allocator(
                     buffer,
@@ -1282,16 +1286,23 @@ class LMCacheEngineBuilder:
                 try:
                     import time
                     start = time.time()
-                    abs_rank = nixl_agent_pool.get_abs_rank(metadata.worker_id)
-                    cpu_buffer = nixl_agent_pool.get_cpu_buffer(abs_rank)
-                    # cpu_buffer = torch.empty(
-                    #     config.nixl_buffer_size,
-                    #     dtype=torch.uint8,
-                    #     device="cpu",
-                    #     pin_memory=False,
-                    # )
+                    # tp_rank = get_tensor_model_parallel_rank()
+                    # abs_rank = nixl_agent_pool.get_abs_rank(tp_rank)
+                    # logger.info(f"worker_id: {metadata.worker_id}, tp_rank: {tp_rank}, abs_rank: {abs_rank}")
+                    # cpu_buffer = nixl_agent_pool.get_cpu_buffer(abs_rank)
+                    # tmp_gpu_buf_large = torch.ones_like(cpu_buffer, device=corrected_device)
+                    # logger.info(f"test copy on the whole cpu buffer")
+                    # cpu_buffer.copy_(tmp_gpu_buf_large)
                     # torch.cuda.synchronize()
-                    # logger.info(f"allocating CPU pageble buffer takes {time.time() - start:.3f}s")
+                    # logger.info(f"gpu copy on whole cpu buffer finished")
+                    cpu_buffer = torch.empty(
+                        config.nixl_buffer_size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=False,
+                    )
+                    torch.cuda.synchronize()
+                    logger.info(f"allocating CPU pageble buffer takes {time.time() - start:.3f}s")
                 except RuntimeError as e:
                     logger.warning(f"Pinned CPU alloc failed ({e}); falling back to pageable.")
                     cpu_buffer = torch.empty(
@@ -1301,6 +1312,14 @@ class LMCacheEngineBuilder:
                         pin_memory=False,
                     )
                 nixl_cpu_mem_allocator.init_cpu_buffer(cpu_buffer)
+                # bufs = nixl_cpu_mem_allocator.nixl_allocator.cpu_paged_buffers
+                # tmp_gpu_buf = torch.ones_like(bufs[0], device=corrected_device)
+                # for idx, buf in enumerate(bufs):
+                #     logger.info(f"Test gpu copy on buf: {idx}")
+                #     buf.copy_(tmp_gpu_buf)
+                #     torch.cuda.synchronize()
+                #     logger.info(f"gpu copy on buf: {idx} finished")
+
                 return nixl_cpu_mem_allocator
             return AdHocMemoryAllocator(config.nixl_buffer_device)
 
