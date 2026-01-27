@@ -179,6 +179,12 @@ class RequestTracker:
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         request_configs = extract_request_configs(new_request.sampling_params)
+        mm_hashes = None
+        if hasattr(new_request, "mm_hashes"):
+            mm_hashes = new_request.mm_hashes
+        mm_positions = None
+        if hasattr(new_request, "mm_positions"):
+            mm_positions = new_request.mm_positions
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -187,8 +193,8 @@ class RequestTracker:
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
-            mm_hashes=new_request.mm_hashes.copy(),
-            mm_positions=new_request.mm_positions.copy(),
+            mm_hashes=mm_hashes,
+            mm_positions=mm_positions,
             request_configs=request_configs,
         )
 
@@ -319,7 +325,7 @@ class ReqMeta:
         token_ids = input_token_ids[:num_tokens_to_save]
 
         # If the request has multimodal hashes, apply them to the token ids
-        if tracker.mm_hashes:
+        if hasattr(tracker, "mm_hashes") and tracker.mm_hashes is not None:
             # TODO: Optimize this
             token_ids = torch.tensor(token_ids)
             assert tracker.mm_positions is not None, (
@@ -1018,7 +1024,7 @@ class LMCacheConnectorV1Impl:
         token_ids = request.prompt_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
-        if request.mm_hashes:
+        if hasattr(request, 'mm_hashes'):
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
             apply_mm_hashes_to_token_ids(
