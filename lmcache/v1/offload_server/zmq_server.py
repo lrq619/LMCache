@@ -5,7 +5,7 @@ import os
 import threading
 
 # Third Party
-from vllm.utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket
 import msgspec
 import zmq
 

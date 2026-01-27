@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import threading
 
 # Third Party
-from vllm.utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket
 import msgspec
 import torch
 import zmq
