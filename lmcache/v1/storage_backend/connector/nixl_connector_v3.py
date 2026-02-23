@@ -660,9 +660,9 @@ class NixlSender:
         receiver_info.receiver_alloc_port = (
             transfer_spec.receiver_info.receiver_alloc_port[self.tp_rank]
         )
-        receiver_info.receiver_id = transfer_spec.receiver_info.receiver_host + str(
-            receiver_info.receiver_init_port
-        )
+        # receiver_info.receiver_id = transfer_spec.receiver_info.receiver_host + str(
+        #     receiver_info.receiver_init_port
+        # )
         
         sender_task = NixlSenderTask(
             req_id=transfer_spec.req_id,
